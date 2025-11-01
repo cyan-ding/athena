@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useSession, signIn, signUp, signOut } from "@/lib/auth";
+import { useUser, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -16,14 +16,7 @@ import type { Id } from "../../convex/_generated/dataModel";
 type TimeRange = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
 
 export default function Home() {
-  const { data: session, isPending } = useSession();
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  const [authLoading, setAuthLoading] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const { user, isLoaded } = useUser();
   const [alertLoading, setAlertLoading] = useState(false);
   const [alertSuccess, setAlertSuccess] = useState(false);
 
@@ -54,20 +47,20 @@ export default function Home() {
   const [showWarnings, setShowWarnings] = useState(true);
 
   // Convex queries and mutations
-  const userId = session?.user?.id || "guest";
+  const userId = user?.id || "guest";
 
-  // Watchlist from Convex
-  const watchlistData = useQuery(api.watchlists.get, { userId });
+  // Watchlist from Convex (skip query if not authenticated)
+  const watchlistData = useQuery(api.watchlists.get, isLoaded && user ? { userId } : "skip");
   const watchlist = watchlistData || ["NVDA", "TSLA", "AAPL"]; // Fallback to defaults
   const addToWatchlist = useMutation(api.watchlists.addTicker);
   const removeFromWatchlist = useMutation(api.watchlists.removeTicker);
 
-  // User preferences from Convex
-  const userPrefs = useQuery(api.userPreferences.get, { userId });
+  // User preferences from Convex (skip query if not authenticated)
+  const userPrefs = useQuery(api.userPreferences.get, isLoaded && user ? { userId } : "skip");
   const updatePreferences = useMutation(api.userPreferences.update);
 
-  // Chat sessions from Convex
-  const chatSessions = useQuery(api.chatSessions.list, { userId });
+  // Chat sessions from Convex (skip query if not authenticated)
+  const chatSessions = useQuery(api.chatSessions.list, isLoaded && user ? { userId } : "skip");
   const addChatMessage = useMutation(api.chatSessions.addMessage);
   const createChatSession = useMutation(api.chatSessions.create);
 
@@ -619,44 +612,11 @@ export default function Home() {
     }
   };
 
-  // Auth handlers
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
-    setAuthError(null);
-
-    try {
-      if (authMode === "signup") {
-        await signUp.email({
-          email,
-          password,
-          name,
-        });
-      } else {
-        await signIn.email({
-          email,
-          password,
-        });
-      }
-      setShowAuthModal(false);
-      setEmail("");
-      setPassword("");
-      setName("");
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : "Authentication failed");
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleSignOut = async () => {
-    await signOut();
-  };
+  // Auth handlers - Clerk handles auth automatically
 
   const handleSendDemoAlert = async () => {
-    if (!session?.user?.email) {
-      setAuthError("Please sign in to receive demo alerts");
-      setShowAuthModal(true);
+    if (!user?.primaryEmailAddress?.emailAddress) {
+      setError("Please sign in to receive demo alerts");
       return;
     }
 
@@ -668,7 +628,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userEmail: session.user.email,
+          userEmail: user.primaryEmailAddress.emailAddress,
           ticker: 'NVDA',
           currentPrice: 515.30,
           changePercent: 12.3,
@@ -717,9 +677,9 @@ export default function Home() {
               </Button>
             </form>
 
-            {isPending ? (
+            {!isLoaded ? (
               <span className="text-sm text-muted-foreground">Loading...</span>
-            ) : session ? (
+            ) : user ? (
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
@@ -729,17 +689,14 @@ export default function Home() {
                 >
                   {alertLoading ? "Sending..." : alertSuccess ? "✓ Alert Sent!" : "Demo Alert"}
                 </Button>
-                <span className="text-sm text-muted-foreground">
-                  {session.user?.email || session.user?.name || "User"}
-                </span>
-                <Button variant="outline" size="sm" onClick={handleSignOut}>
-                  Sign Out
-                </Button>
+                <UserButton />
               </div>
             ) : (
-              <Button variant="outline" size="sm" onClick={() => setShowAuthModal(true)}>
-                Sign In
-              </Button>
+              <SignInButton>
+                <Button variant="outline" size="sm">
+                  Sign In
+                </Button>
+              </SignInButton>
             )}
           </div>
         </div>
@@ -1168,105 +1125,6 @@ export default function Home() {
         </aside>
       </main>
 
-      {/* Auth Modal */}
-      {showAuthModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-background rounded-lg border p-6 w-full max-w-md">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-semibold">
-                {authMode === "signin" ? "Sign In" : "Sign Up"}
-              </h2>
-              <button
-                onClick={() => setShowAuthModal(false)}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                ✕
-              </button>
-            </div>
-
-            {authError && (
-              <div className="mb-4 rounded bg-red-50 p-3 text-sm text-red-600">
-                {authError}
-              </div>
-            )}
-
-            <form onSubmit={handleAuth} className="space-y-4">
-              {authMode === "signup" && (
-                <div>
-                  <label className="text-sm font-medium mb-1 block">Name</label>
-                  <Input
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
-                    required
-                  />
-                </div>
-              )}
-
-              <div>
-                <label className="text-sm font-medium mb-1 block">Email</label>
-                <Input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="text-sm font-medium mb-1 block">Password</label>
-                <Input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  required
-                />
-              </div>
-
-              <Button type="submit" className="w-full" disabled={authLoading}>
-                {authLoading
-                  ? "Loading..."
-                  : authMode === "signin"
-                  ? "Sign In"
-                  : "Sign Up"}
-              </Button>
-            </form>
-
-            <div className="mt-4 text-center text-sm">
-              {authMode === "signin" ? (
-                <span>
-                  Don't have an account?{" "}
-                  <button
-                    onClick={() => {
-                      setAuthMode("signup");
-                      setAuthError(null);
-                    }}
-                    className="text-primary hover:underline"
-                  >
-                    Sign up
-                  </button>
-                </span>
-              ) : (
-                <span>
-                  Already have an account?{" "}
-                  <button
-                    onClick={() => {
-                      setAuthMode("signin");
-                      setAuthError(null);
-                    }}
-                    className="text-primary hover:underline"
-                  >
-                    Sign in
-                  </button>
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
