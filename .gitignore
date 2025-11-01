@@ -36,7 +36,7 @@ yarn-error.log*
 
 # convex
 .convex/
-convex/_generated/
+# convex/_generated/ - COMMENTED OUT: Need these files for Vercel deployment
 
 # vercel
 .vercel
