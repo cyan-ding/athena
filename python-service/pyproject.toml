@@ -1,0 +1,16 @@
+[project]
+name = "athena-browser-service"
+version = "0.1.0"
+description = "Browser-use scraping service for Athena"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "browser-use>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
