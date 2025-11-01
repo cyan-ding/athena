@@ -37,6 +37,9 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
   const [showQuestionInput, setShowQuestionInput] = useState(false);
   const isLoadingRef = useRef(false);
   const lastLoadTriggerTime = useRef<number | null>(null);
+  const hasInitializedRef = useRef(false);
+  const isFirstDataLoad = useRef(true);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Chart initialization - only runs once on mount
   useEffect(() => {
@@ -44,7 +47,7 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
-      height: 500,
+      height: chartContainerRef.current.clientHeight,
       layout: {
         background: { type: ColorType.Solid, color: "#ffffff" },
         textColor: "#333",
@@ -95,6 +98,7 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
       if (chartContainerRef.current && chart) {
         chart.applyOptions({
           width: chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
         });
       }
     };
@@ -187,47 +191,74 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
     };
   }, []); // Empty dependency array - only run once on mount
 
+  // Reset state when ticker changes or data is completely replaced
+  useEffect(() => {
+    lastLoadTriggerTime.current = null;
+    hasInitializedRef.current = false;
+    isFirstDataLoad.current = true;
+  }, [ticker]); // Reset when ticker changes
+
   // Separate effect for handling visible time range changes
+  // This only re-runs when the callback dependencies change, not when data changes
   useEffect(() => {
     if (!chartRef.current || !onLoadMoreData) return;
 
     const handleVisibleTimeRangeChange = () => {
-      if (isLoadingRef.current || isLoadingMore || data.length === 0) return;
-
-      const timeScale = chartRef.current!.timeScale();
-      const visibleRange = timeScale.getVisibleRange();
-
-      if (!visibleRange) return;
-
-      // Get the earliest timestamp in our current data (in seconds)
-      const earliestDataTime = Math.min(...data.map(d => d.timestamp / 1000));
-
-      // Convert Time to number for comparison
-      const visibleFrom = Number(visibleRange.from);
-
-      // Calculate the total time range of current data
-      const latestDataTime = Math.max(...data.map(d => d.timestamp / 1000));
-      const dataTimeSpan = latestDataTime - earliestDataTime;
-
-      // Only trigger load if:
-      // 1. User has scrolled to view area within 20% of the earliest data point
-      // 2. We haven't triggered a load at this threshold yet (or it's significantly earlier)
-      const threshold = earliestDataTime + (dataTimeSpan * 0.2);
-
-      if (visibleFrom <= threshold) {
-        // Check if we've already loaded at this point or further back
-        if (lastLoadTriggerTime.current === null ||
-            earliestDataTime < lastLoadTriggerTime.current - (dataTimeSpan * 0.3)) {
-
-          isLoadingRef.current = true;
-          lastLoadTriggerTime.current = earliestDataTime;
-
-          onLoadMoreData(data[0].timestamp)
-            .finally(() => {
-              isLoadingRef.current = false;
-            });
-        }
+      // Skip if already loading, no data, or not initialized
+      if (isLoadingRef.current || isLoadingMore || data.length === 0 || !hasInitializedRef.current) {
+        return;
       }
+
+      // Clear any existing debounce timer
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+
+      // Debounce the scroll check - wait 500ms after scrolling stops
+      debounceTimerRef.current = setTimeout(() => {
+        const timeScale = chartRef.current!.timeScale();
+        const visibleRange = timeScale.getVisibleRange();
+
+        if (!visibleRange) return;
+
+        // Get the earliest timestamp in our current data (in seconds)
+        const earliestDataTime = Math.min(...data.map(d => d.timestamp / 1000));
+        const latestDataTime = Math.max(...data.map(d => d.timestamp / 1000));
+
+        // Convert Time to number for comparison
+        const visibleFrom = Number(visibleRange.from);
+
+        // Simple threshold: 50% of the way from earliest to latest
+        const midpoint = earliestDataTime + ((latestDataTime - earliestDataTime) / 2);
+
+        // Only load more data if:
+        // 1. User scrolled past the 50% midpoint
+        // 2. We haven't already triggered a load for this timestamp or earlier
+        if (visibleFrom <= midpoint) {
+          const shouldTrigger = lastLoadTriggerTime.current === null ||
+                                earliestDataTime < lastLoadTriggerTime.current;
+
+          console.log('[PriceChart] Load check:', {
+            visibleFrom: new Date(visibleFrom * 1000).toISOString(),
+            earliestDataTime: new Date(earliestDataTime * 1000).toISOString(),
+            lastLoadTriggerTime: lastLoadTriggerTime.current ? new Date(lastLoadTriggerTime.current * 1000).toISOString() : 'null',
+            shouldTrigger
+          });
+
+          if (shouldTrigger) {
+            console.log('[PriceChart] Triggering load more data');
+            isLoadingRef.current = true;
+            lastLoadTriggerTime.current = earliestDataTime;
+
+            // Pass the actual earliest timestamp in milliseconds
+            const earliestTimestampMs = Math.min(...data.map(d => d.timestamp));
+            onLoadMoreData(earliestTimestampMs)
+              .finally(() => {
+                isLoadingRef.current = false;
+              });
+          }
+        }
+      }, 500); // 500ms debounce delay
     };
 
     const chart = chartRef.current;
@@ -235,35 +266,59 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
 
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleTimeRangeChange);
+      // Clean up any pending debounce timer
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
     };
-  }, [data, onLoadMoreData, isLoadingMore]);
+  }, [onLoadMoreData, isLoadingMore]); // Removed 'data' dependency to prevent re-subscription
 
   useEffect(() => {
     if (!candlestickSeriesRef.current || !data.length) return;
 
-    const chartData = data.map((bar) => ({
-      time: Number((bar.timestamp / 1000).toFixed(0)) as any,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    }));
+    const chartData = data
+      .map((bar) => ({
+        time: Number((bar.timestamp / 1000).toFixed(0)) as any,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      }))
+      // IMPORTANT: Sort by time ascending for lightweight-charts
+      .sort((a, b) => a.time - b.time);
 
-    // Store current visible range if we're loading more data
+    console.log('[PriceChart] Setting chart data:', {
+      dataPoints: chartData.length,
+      earliest: new Date(chartData[0].time * 1000).toISOString(),
+      latest: new Date(chartData[chartData.length - 1].time * 1000).toISOString(),
+      isFirstLoad: isFirstDataLoad.current
+    });
+
+    // Store current visible range to preserve it (unless it's the very first load)
     let currentVisibleRange = null;
-    if (chartRef.current && isLoadingMore) {
+    if (chartRef.current && !isFirstDataLoad.current) {
       currentVisibleRange = chartRef.current.timeScale().getVisibleRange();
     }
 
     candlestickSeriesRef.current.setData(chartData);
 
     if (chartRef.current) {
-      // If we're loading more data, restore the visible range to prevent jumping
-      if (isLoadingMore && currentVisibleRange) {
-        chartRef.current.timeScale().setVisibleRange(currentVisibleRange);
-      } else {
-        // Otherwise, fit content for initial load
+      if (isFirstDataLoad.current) {
+        // First load: fit content to show all data
         chartRef.current.timeScale().fitContent();
+        isFirstDataLoad.current = false;
+        console.log('[PriceChart] First load - fitting content');
+
+        // Use setTimeout to ensure the fitContent has completed and the chart has stabilized
+        // before we start listening for scroll events
+        setTimeout(() => {
+          hasInitializedRef.current = true;
+          console.log('[PriceChart] Chart initialization complete, auto-load now enabled');
+        }, 100);
+      } else if (currentVisibleRange) {
+        // Subsequent loads: preserve the visible range to prevent jumping
+        chartRef.current.timeScale().setVisibleRange(currentVisibleRange);
+        console.log('[PriceChart] Preserving visible range');
       }
     }
   }, [data, isLoadingMore]);
@@ -379,7 +434,6 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
             <div className="flex gap-2">
               <Input
                 type="text"
-                placeholder="Optional: Add a specific question..."
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAskQuestion()}

@@ -1,15 +1,29 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { PriceChart } from "@/components/PriceChart";
+import { TradingPanel } from "@/components/TradingPanel";
+import { PortfolioDashboard } from "@/components/PortfolioDashboard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useSession, signIn, signUp, signOut } from "@/lib/auth";
 
 type TimeRange = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
 
 export default function Home() {
+  const { data: session, isPending } = useSession();
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [alertSuccess, setAlertSuccess] = useState(false);
+
   const [ticker, setTicker] = useState("NVDA");
   const [searchInput, setSearchInput] = useState("");
   const [chartData, setChartData] = useState<any[]>([]);
@@ -27,6 +41,14 @@ export default function Home() {
   const [currentTimespan, setCurrentTimespan] = useState<"hour" | "day">("day");
   const [earliestFetchedTimestamp, setEarliestFetchedTimestamp] = useState<number | null>(null);
   const [showCitations, setShowCitations] = useState(false);
+  const [currentPrice, setCurrentPrice] = useState<number | undefined>(undefined);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [collationProgress, setCollationProgress] = useState<{
+    stage: string;
+    progress: number;
+    total: number;
+  } | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Load default ticker on mount
   useEffect(() => {
@@ -105,6 +127,10 @@ export default function Home() {
       if (fetchedData.length > 0) {
         const earliest = Math.min(...fetchedData.map((d: any) => d.timestamp));
         setEarliestFetchedTimestamp(earliest);
+
+        // Set current price (most recent data point)
+        const mostRecent = fetchedData[fetchedData.length - 1];
+        setCurrentPrice(mostRecent?.close);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
@@ -115,15 +141,24 @@ export default function Home() {
   };
 
   const handleLoadMoreData = async (earliestTimestamp: number) => {
+    console.log('[handleLoadMoreData] Called with:', {
+      earliestTimestamp: new Date(earliestTimestamp).toISOString(),
+      earliestFetchedTimestamp: earliestFetchedTimestamp ? new Date(earliestFetchedTimestamp).toISOString() : 'null',
+      isLoadingMore,
+      ticker
+    });
+
     if (isLoadingMore || !ticker) return;
 
     // Check if we've already fetched data earlier than this timestamp
     // If so, don't re-fetch (caching mechanism)
-    if (earliestFetchedTimestamp && earliestTimestamp >= earliestFetchedTimestamp) {
-      console.log("Data already cached, skipping fetch");
+    // Skip only if we already have data earlier (smaller timestamp) than what's being requested
+    if (earliestFetchedTimestamp && earliestFetchedTimestamp < earliestTimestamp) {
+      console.log("[handleLoadMoreData] Data already cached, skipping fetch (have data back to", new Date(earliestFetchedTimestamp).toISOString(), ")");
       return;
     }
 
+    console.log('[handleLoadMoreData] Starting fetch...');
     setIsLoadingMore(true);
 
     try {
@@ -156,6 +191,14 @@ export default function Home() {
         .toISOString()
         .split("T")[0];
 
+      console.log('[handleLoadMoreData] Fetching:', {
+        ticker,
+        from,
+        to,
+        timespan: currentTimespan,
+        url: `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}`
+      });
+
       const response = await fetch(
         `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}`
       );
@@ -166,12 +209,22 @@ export default function Home() {
       }
 
       const result = await response.json();
+      console.log('[handleLoadMoreData] Raw API response:', result);
 
       // Prepend new data to existing data, removing duplicates
       if (result.data && result.data.length > 0) {
         const newData = result.data;
         const existingTimestamps = new Set(chartData.map(d => d.timestamp));
         const uniqueNewData = newData.filter((d: any) => !existingTimestamps.has(d.timestamp));
+
+        console.log('[handleLoadMoreData] Received data:', {
+          totalReceived: newData.length,
+          uniqueNew: uniqueNewData.length,
+          dateRange: uniqueNewData.length > 0 ? {
+            from: new Date(Math.min(...uniqueNewData.map((d: any) => d.timestamp))).toISOString(),
+            to: new Date(Math.max(...uniqueNewData.map((d: any) => d.timestamp))).toISOString()
+          } : 'none'
+        });
 
         if (uniqueNewData.length > 0) {
           const updatedData = [...uniqueNewData, ...chartData];
@@ -180,7 +233,10 @@ export default function Home() {
           // Update the earliest fetched timestamp
           const newEarliest = Math.min(...updatedData.map((d: any) => d.timestamp));
           setEarliestFetchedTimestamp(newEarliest);
+          console.log('[handleLoadMoreData] Updated chart data, new earliest:', new Date(newEarliest).toISOString());
         }
+      } else {
+        console.log('[handleLoadMoreData] No new data received');
       }
     } catch (err) {
       console.error("Error loading more data:", err);
@@ -195,12 +251,12 @@ export default function Home() {
     if (searchInput.trim()) {
       const newTicker = searchInput.trim().toUpperCase();
       fetchMarketData(newTicker);
-      
-      // Auto-add to watchlist if not already there
-      if (!watchlist.includes(newTicker)) {
+
+      // Auto-add to watchlist if not already there and not at max capacity
+      if (!watchlist.includes(newTicker) && watchlist.length < 5) {
         setWatchlist([...watchlist, newTicker]);
       }
-      
+
       setSearchInput("");
     }
   };
@@ -217,10 +273,14 @@ export default function Home() {
     setSelectedTimeEnd(end);
     setQuestion(userQuestion);
 
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+
     // Automatically submit the query
     setChatLoading(true);
     setChatResponse(null);
     setError(null);
+    setCollationProgress(null);
 
     try {
       // Calculate time range
@@ -237,6 +297,7 @@ export default function Home() {
           endDate,
           useBrowserUse,
         }),
+        signal: abortControllerRef.current?.signal,
       });
 
       if (!response.ok) {
@@ -244,13 +305,49 @@ export default function Home() {
         throw new Error(errorData.error || 'Failed to get answer');
       }
 
-      const data = await response.json();
-      setChatResponse(data);
+      // Handle streaming response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (reader) {
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === 'progress') {
+                setCollationProgress({
+                  stage: data.stage,
+                  progress: data.progress,
+                  total: data.total,
+                });
+              } else if (data.type === 'complete') {
+                setChatResponse(data);
+                setCollationProgress(null);
+              }
+            }
+          }
+        }
+      }
     } catch (err) {
+      // Don't show error if request was aborted
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.log('Chat request cancelled by user');
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Unknown error');
       console.error('Chat error:', err);
     } finally {
       setChatLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -258,14 +355,28 @@ export default function Home() {
     setWatchlist(watchlist.filter(t => t !== tickerToRemove));
   };
 
+  const handleCancelChat = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setChatLoading(false);
+      setCollationProgress(null);
+      setError("Request cancelled by user");
+    }
+  };
+
   const handleAskAthena = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!question.trim()) return;
 
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+
     setChatLoading(true);
     setChatResponse(null);
     setError(null);
+    setCollationProgress(null);
 
     try {
       // Calculate time range
@@ -276,10 +387,10 @@ export default function Home() {
         startDate = new Date(selectedTimeStart * 1000).toISOString().split('T')[0];
         endDate = new Date(selectedTimeEnd * 1000).toISOString().split('T')[0];
       } else if (chartData.length > 0) {
-        // Use full chart range
-        const dates = chartData.map(d => d.time);
-        startDate = new Date(Math.min(...dates) * 1000).toISOString().split('T')[0];
-        endDate = new Date(Math.max(...dates) * 1000).toISOString().split('T')[0];
+        // Use full chart range - timestamps are in milliseconds
+        const timestamps = chartData.map(d => d.timestamp);
+        startDate = new Date(Math.min(...timestamps)).toISOString().split('T')[0];
+        endDate = new Date(Math.max(...timestamps)).toISOString().split('T')[0];
       }
 
       const response = await fetch('/api/ai/chat', {
@@ -292,6 +403,7 @@ export default function Home() {
           endDate,
           useBrowserUse,
         }),
+        signal: abortControllerRef.current?.signal,
       });
 
       if (!response.ok) {
@@ -299,13 +411,141 @@ export default function Home() {
         throw new Error(errorData.error || 'Failed to get answer');
       }
 
-      const data = await response.json();
-      setChatResponse(data);
+      // Handle streaming response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (reader) {
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === 'progress') {
+                setCollationProgress({
+                  stage: data.stage,
+                  progress: data.progress,
+                  total: data.total,
+                });
+              } else if (data.type === 'complete') {
+                setChatResponse(data);
+                setCollationProgress(null);
+              }
+            }
+          }
+        }
+      }
+
+      // Reset textarea height after successful submission
+      if (textareaRef.current) {
+        textareaRef.current.style.height = '40px';
+      }
     } catch (err) {
+      // Don't show error if request was aborted
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.log('Chat request cancelled by user');
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Unknown error');
       console.error('Chat error:', err);
     } finally {
       setChatLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+
+  // Auto-resize textarea
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setQuestion(e.target.value);
+
+    const textarea = textareaRef.current;
+    if (textarea) {
+      // Reset height to auto to get the correct scrollHeight
+      textarea.style.height = 'auto';
+
+      // Set height based on scrollHeight, but cap at maxHeight
+      const maxHeight = 72; // 3 lines approximately
+      const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+      textarea.style.height = `${newHeight}px`;
+    }
+  };
+
+  // Auth handlers
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      if (authMode === "signup") {
+        await signUp.email({
+          email,
+          password,
+          name,
+        });
+      } else {
+        await signIn.email({
+          email,
+          password,
+        });
+      }
+      setShowAuthModal(false);
+      setEmail("");
+      setPassword("");
+      setName("");
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Authentication failed");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+  };
+
+  const handleSendDemoAlert = async () => {
+    if (!session?.user?.email) {
+      setAuthError("Please sign in to receive demo alerts");
+      setShowAuthModal(true);
+      return;
+    }
+
+    setAlertLoading(true);
+    setAlertSuccess(false);
+
+    try {
+      const response = await fetch('/api/agentmail/send-alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userEmail: session.user.email,
+          ticker: 'NVDA',
+          currentPrice: 515.30,
+          changePercent: 12.3,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to send alert');
+      }
+
+      setAlertSuccess(true);
+      setTimeout(() => setAlertSuccess(false), 5000);
+    } catch (err) {
+      console.error('Alert error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to send alert');
+    } finally {
+      setAlertLoading(false);
     }
   };
 
@@ -335,46 +575,90 @@ export default function Home() {
                 {loading ? "Loading..." : "Load"}
               </Button>
             </form>
-            <span className="text-sm text-muted-foreground">Demo User</span>
+
+            {isPending ? (
+              <span className="text-sm text-muted-foreground">Loading...</span>
+            ) : session ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSendDemoAlert}
+                  disabled={alertLoading}
+                >
+                  {alertLoading ? "Sending..." : alertSuccess ? "✓ Alert Sent!" : "Demo Alert"}
+                </Button>
+                <span className="text-sm text-muted-foreground">
+                  {session.user?.email || session.user?.name || "User"}
+                </span>
+                <Button variant="outline" size="sm" onClick={handleSignOut}>
+                  Sign Out
+                </Button>
+              </div>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => setShowAuthModal(true)}>
+                Sign In
+              </Button>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Dashboard */}
       <main className="flex flex-1 gap-4 p-6 overflow-hidden min-h-0">
-        {/* Left Sidebar - Watchlist */}
-        <aside className="w-64 rounded-lg border p-4 overflow-y-auto flex-shrink-0">
-          <h2 className="mb-4 font-semibold">Watchlist</h2>
-          <div className="space-y-2">
-            {watchlist.map((tickerItem) => (
-              <div
-                key={tickerItem}
-                className="flex items-center justify-between group"
-              >
-                <button
-                  onClick={() => fetchMarketData(tickerItem, selectedTimeRange, true)}
-                  className={`flex-1 rounded px-2 py-1 text-left text-sm hover:bg-muted ${ticker === tickerItem ? 'bg-muted font-medium' : ''}`}
-                >
-                  {tickerItem}
-                </button>
-                <button
-                  onClick={() => handleRemoveFromWatchlist(tickerItem)}
-                  className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive px-1"
-                  title={`Remove ${tickerItem}`}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+        {/* Left Sidebar - Watchlist + Portfolio */}
+        <aside className="w-64 rounded-lg border flex flex-col overflow-hidden flex-shrink-0">
+          {/* Watchlist Section - Fixed height */}
+          <div className="p-4 border-b flex-shrink-0">
+            <h2 className="mb-4 font-semibold">Watchlist</h2>
+            <div className="space-y-2">
+              {Array.from({ length: 5 }).map((_, index) => {
+                const tickerItem = watchlist[index];
+                return (
+                  <div
+                    key={index}
+                    className="flex items-center justify-between group h-8"
+                  >
+                    {tickerItem ? (
+                      <>
+                        <button
+                          onClick={() => fetchMarketData(tickerItem, selectedTimeRange, true)}
+                          className={`flex-1 rounded px-2 py-1 text-left text-sm hover:bg-muted ${ticker === tickerItem ? 'bg-muted font-medium' : ''}`}
+                        >
+                          {tickerItem}
+                        </button>
+                        <button
+                          onClick={() => handleRemoveFromWatchlist(tickerItem)}
+                          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive px-1"
+                          title={`Remove ${tickerItem}`}
+                        >
+                          ×
+                        </button>
+                      </>
+                    ) : (
+                      <div className="flex-1 rounded px-2 py-1 text-sm text-muted-foreground/40">
+                        —
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Portfolio Section - Scrollable */}
+          <div className="flex-1 overflow-y-auto p-4">
+            <PortfolioDashboard />
           </div>
         </aside>
 
-        {/* Center - Chart Area */}
-        <div className="flex flex-1 flex-col gap-4 min-h-0">
+        {/* Center - Chart + Trading Area */}
+        <div className="flex flex-1 flex-col gap-3 min-h-0 overflow-hidden">
           {/* Chart */}
-          <div className="rounded-lg border p-6 flex flex-col overflow-hidden" style={{ flex: '1 1 0', minHeight: 0 }}>
-            <div className="mb-4 flex items-center justify-between flex-shrink-0">
-              <h2 className="text-xl font-semibold">Price Chart</h2>
+          <div className="rounded-lg border p-4 flex flex-col overflow-hidden flex-1">
+            <div className="mb-3 flex items-center justify-between flex-shrink-0">
+              <h2 className="text-lg font-semibold">Price Chart</h2>
+
               {/* Time Range Buttons */}
               <div className="flex gap-1">
                 {(["1D", "1W", "1M", "3M", "6M", "1Y"] as TimeRange[]).map((range) => (
@@ -382,7 +666,7 @@ export default function Home() {
                     key={range}
                     onClick={() => handleTimeRangeChange(range)}
                     disabled={loading}
-                    className={`rounded px-3 py-1 text-sm transition-colors ${
+                    className={`rounded px-2 py-1 text-xs transition-colors ${
                       selectedTimeRange === range
                         ? "bg-primary text-primary-foreground"
                         : "bg-muted hover:bg-muted/80"
@@ -395,7 +679,7 @@ export default function Home() {
             </div>
 
             {error && (
-              <div className="mb-4 rounded bg-red-50 p-3 text-sm text-red-600 flex-shrink-0">
+              <div className="mb-3 rounded bg-red-50 p-2 text-xs text-red-600 flex-shrink-0">
                 {error}
                 <p className="mt-1 text-xs">
                   Tip: If you hit rate limits, wait 60 seconds before trying again
@@ -415,7 +699,7 @@ export default function Home() {
               ) : (
                 <div className="flex h-full items-center justify-center rounded bg-muted/20">
                   <div className="text-center">
-                    <p className="text-muted-foreground">
+                    <p className="text-muted-foreground text-sm">
                       {loading
                         ? "Loading chart data..."
                         : "Search for a ticker to view the chart"}
@@ -429,6 +713,12 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Trading Panel - Compact */}
+          {ticker && (
+            <div className="flex-shrink-0">
+              <TradingPanel ticker={ticker} currentPrice={currentPrice} />
+            </div>
+          )}
         </div>
 
         {/* Right Sidebar - AI Chat */}
@@ -460,20 +750,51 @@ export default function Home() {
             )}
 
             {chatLoading && (
-              <div className="flex items-center justify-center py-8">
-                <div className="text-center">
-                  <div className="text-sm text-muted-foreground">
-                    {useBrowserUse ? "Scraping social media..." : "Searching..."}
-                  </div>
-                  <div className="mt-2 text-xs text-muted-foreground">
-                    {useBrowserUse ? "This may take 10-20 seconds" : "Please wait"}
-                  </div>
+              <div className="flex flex-col items-center justify-center py-8 px-4">
+                <div className="w-full max-w-sm space-y-4">
+                  {collationProgress ? (
+                    <>
+                      <div className="text-sm font-medium text-center">
+                        {collationProgress.stage}
+                      </div>
+                      <div className="space-y-2">
+                        <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                          <div
+                            className="bg-primary h-full transition-all duration-300 ease-out"
+                            style={{
+                              width: `${(collationProgress.progress / collationProgress.total) * 100}%`
+                            }}
+                          />
+                        </div>
+                        <div className="text-xs text-muted-foreground text-center">
+                          Step {collationProgress.progress} of {collationProgress.total}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center">
+                      <div className="text-sm text-muted-foreground">
+                        {useBrowserUse ? "Scraping social media..." : "Searching..."}
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        {useBrowserUse ? "This may take 10-20 seconds" : "Please wait"}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
             {chatResponse && !chatLoading && (
               <div className="space-y-4">
+                {/* Memory Indicator */}
+                {chatResponse.metadata?.hasMemory && (
+                  <div className="rounded-lg bg-blue-50 border-blue-200 border p-3 text-xs text-blue-800">
+                    <div className="font-semibold mb-1">Memory Active</div>
+                    <div>Athena is using your trading history to personalize this response.</div>
+                  </div>
+                )}
+
                 {/* Answer */}
                 <div className="rounded-lg bg-muted/30 p-4 border">
                   <div className="text-xs font-semibold text-muted-foreground mb-2">
@@ -637,20 +958,6 @@ export default function Home() {
                   <div className="text-sm text-muted-foreground mb-2">
                     Ask questions about {ticker || "stocks"}, market events, or company filings
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {useBrowserUse
-                      ? "Social scraping enabled - responses may take 10-20 seconds"
-                      : "Using Perplexity + EDGAR for fast responses"}
-                  </div>
-                  <div className="mt-4 space-y-1 text-xs text-muted-foreground text-left">
-                    <div className="font-semibold mb-2">Try asking:</div>
-                    <div>• "What are the main business risks?"</div>
-                    <div>• "Why did the stock spike recently?"</div>
-                    <div>• "What do analysts predict?"</div>
-                    {selectedTimeStart && selectedTimeEnd && (
-                      <div className="mt-2 italic">• "What happened in this time range?"</div>
-                    )}
-                  </div>
                 </div>
               </div>
             )}
@@ -664,21 +971,140 @@ export default function Home() {
               </div>
             )}
 
-            <form onSubmit={handleAskAthena} className="flex gap-2">
-              <Input
-                type="text"
+            <form onSubmit={handleAskAthena} className="flex gap-2 items-end">
+              <textarea
+                ref={textareaRef}
                 placeholder={`Ask about ${ticker || "a stock"}...`}
                 value={question}
-                onChange={(e) => setQuestion(e.target.value)}
+                onChange={handleTextareaChange}
                 disabled={chatLoading}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleAskAthena(e as any);
+                  }
+                }}
+                className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 overflow-y-auto"
+                style={{
+                  height: '40px',
+                  maxHeight: '72px',
+                  lineHeight: '1.5'
+                }}
+                rows={1}
               />
-              <Button type="submit" disabled={chatLoading || !question.trim()}>
-                {chatLoading ? "..." : "Send"}
+              <Button
+                type={chatLoading ? "button" : "submit"}
+                onClick={chatLoading ? handleCancelChat : undefined}
+                disabled={!chatLoading && !question.trim()}
+                className="h-10"
+                variant={chatLoading ? "destructive" : "default"}
+              >
+                {chatLoading ? "Cancel" : "Send"}
               </Button>
             </form>
           </div>
         </aside>
       </main>
+
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-background rounded-lg border p-6 w-full max-w-md">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-semibold">
+                {authMode === "signin" ? "Sign In" : "Sign Up"}
+              </h2>
+              <button
+                onClick={() => setShowAuthModal(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                ✕
+              </button>
+            </div>
+
+            {authError && (
+              <div className="mb-4 rounded bg-red-50 p-3 text-sm text-red-600">
+                {authError}
+              </div>
+            )}
+
+            <form onSubmit={handleAuth} className="space-y-4">
+              {authMode === "signup" && (
+                <div>
+                  <label className="text-sm font-medium mb-1 block">Name</label>
+                  <Input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Your name"
+                    required
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-sm font-medium mb-1 block">Email</label>
+                <Input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-sm font-medium mb-1 block">Password</label>
+                <Input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                />
+              </div>
+
+              <Button type="submit" className="w-full" disabled={authLoading}>
+                {authLoading
+                  ? "Loading..."
+                  : authMode === "signin"
+                  ? "Sign In"
+                  : "Sign Up"}
+              </Button>
+            </form>
+
+            <div className="mt-4 text-center text-sm">
+              {authMode === "signin" ? (
+                <span>
+                  Don't have an account?{" "}
+                  <button
+                    onClick={() => {
+                      setAuthMode("signup");
+                      setAuthError(null);
+                    }}
+                    className="text-primary hover:underline"
+                  >
+                    Sign up
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  Already have an account?{" "}
+                  <button
+                    onClick={() => {
+                      setAuthMode("signin");
+                      setAuthError(null);
+                    }}
+                    className="text-primary hover:underline"
+                  >
+                    Sign in
+                  </button>
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

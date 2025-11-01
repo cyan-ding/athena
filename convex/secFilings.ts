@@ -72,6 +72,156 @@ export const getChunk = query({
 });
 
 /**
+ * Helper query for keyword/text search
+ */
+export const keywordSearchQuery = query({
+  args: {
+    ticker: v.string(),
+    query: v.string(),
+    formType: v.optional(v.string()),
+    limit: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // Perform text search using Convex search API
+    const searchResults = await ctx.db
+      .query("secFilingChunks")
+      .withSearchIndex("search_text", (q) => {
+        let search = q.search("text", args.query);
+        if (args.formType) {
+          search = search.eq("formType", args.formType);
+        }
+        return search.eq("ticker", args.ticker);
+      })
+      .take(args.limit);
+
+    // Return results with synthetic scores based on rank
+    return searchResults.map((chunk, index) => ({
+      ...chunk,
+      score: 1.0 - (index * 0.05), // Descending score based on rank
+    }));
+  },
+});
+
+/**
+ * Keyword/text search for SEC filing chunks (action wrapper)
+ */
+export const keywordSearchFilingChunks = action({
+  args: {
+    ticker: v.string(),
+    query: v.string(),
+    formType: v.optional(v.string()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<any[]> => {
+    const limit = args.limit ?? 5;
+
+    // Call the query to perform text search
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const results: any[] = await ctx.runQuery(api.secFilings.keywordSearchQuery, {
+      ticker: args.ticker,
+      query: args.query,
+      formType: args.formType,
+      limit: limit * 3, // Get more candidates
+    });
+
+    console.log(`[Convex Keyword Search] Got ${results.length} keyword matches`);
+
+    return results.slice(0, limit);
+  },
+});
+
+/**
+ * Hybrid search combining vector similarity and keyword matching
+ * Uses Reciprocal Rank Fusion (RRF) to merge results
+ */
+export const hybridSearchFilingChunks = action({
+  args: {
+    ticker: v.string(),
+    query: v.string(),
+    embedding: v.array(v.float64()),
+    formType: v.optional(v.string()),
+    limit: v.optional(v.number()),
+    minScore: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<any[]> => {
+    const limit = args.limit ?? 5;
+
+    // Run both searches in parallel
+    const [vectorResults, keywordResults] = await Promise.all([
+      // Vector search
+      ctx.runAction(api.secFilings.searchFilingChunks, {
+        ticker: args.ticker,
+        embedding: args.embedding,
+        formType: args.formType,
+        limit: limit * 2, // Get more candidates for merging
+        minScore: args.minScore ?? 0.3,
+      }),
+      // Keyword search
+      ctx.runAction(api.secFilings.keywordSearchFilingChunks, {
+        ticker: args.ticker,
+        query: args.query,
+        formType: args.formType,
+        limit: limit * 2, // Get more candidates for merging
+      }),
+    ]);
+
+    console.log(
+      `[Hybrid Search] Vector: ${vectorResults.length}, Keyword: ${keywordResults.length}`
+    );
+
+    // Reciprocal Rank Fusion (RRF) algorithm
+    // Score = sum of 1/(k + rank) for each result list where item appears
+    const k = 60; // RRF constant
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scoreMap = new Map<string, { chunk: any; rrfScore: number }>();
+
+    // Process vector results
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vectorResults.forEach((chunk: any, rank: number) => {
+      const id = chunk._id;
+      const rrfScore = 1 / (k + rank + 1);
+      scoreMap.set(id, {
+        chunk: { ...chunk, vectorScore: chunk.score },
+        rrfScore,
+      });
+    });
+
+    // Process keyword results
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    keywordResults.forEach((chunk: any, rank: number) => {
+      const id = chunk._id;
+      const rrfScore = 1 / (k + rank + 1);
+      const existing = scoreMap.get(id);
+
+      if (existing) {
+        // Combine scores if chunk appears in both result sets
+        existing.rrfScore += rrfScore;
+        existing.chunk.keywordScore = chunk.score;
+      } else {
+        scoreMap.set(id, {
+          chunk: { ...chunk, keywordScore: chunk.score },
+          rrfScore,
+        });
+      }
+    });
+
+    // Sort by combined RRF score
+    const mergedResults = Array.from(scoreMap.values())
+      .sort((a, b) => b.rrfScore - a.rrfScore)
+      .map((item) => ({
+        ...item.chunk,
+        hybridScore: item.rrfScore,
+        // Keep original scores for debugging
+        score: item.rrfScore, // Use hybrid score as primary score
+      }));
+
+    console.log(`[Hybrid Search] Merged to ${mergedResults.length} unique results`);
+
+    return mergedResults.slice(0, limit);
+  },
+});
+
+/**
  * Vector search for relevant SEC filing chunks
  */
 export const searchFilingChunks = action({
@@ -80,16 +230,20 @@ export const searchFilingChunks = action({
     embedding: v.array(v.float64()),
     formType: v.optional(v.string()),
     limit: v.optional(v.number()),
+    minScore: v.optional(v.number()), // Minimum similarity score (0-1)
   },
   handler: async (ctx, args) => {
     const limit = args.limit ?? 5;
+    const minScore = args.minScore ?? 0.5; // Default threshold of 0.5
 
-    // Perform vector search
+    // Perform vector search with higher limit to get more candidates
     const results = await ctx.vectorSearch("secFilingChunks", "by_embedding", {
       vector: args.embedding,
-      limit: args.formType ? limit * 3 : limit,
+      limit: args.formType ? limit * 5 : limit * 3, // Get more candidates
       filter: (q) => q.eq("ticker", args.ticker),
     });
+
+    console.log(`[Convex Search] Got ${results.length} raw results`);
 
     // Fetch full document data for each result
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -104,13 +258,22 @@ export const searchFilingChunks = action({
 
     // Filter out nulls and apply formType filter if needed
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const validChunks = chunks.filter((c: any) => c !== null);
+    let validChunks = chunks.filter((c: any) => c !== null);
+
+    // Apply score threshold
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    validChunks = validChunks.filter((c: any) => c.score >= minScore);
+
+    console.log(`[Convex Search] After score filter (>=${minScore}): ${validChunks.length} chunks`);
+
     if (args.formType) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return validChunks.filter((c: any) => c.formType === args.formType).slice(0, limit);
+      validChunks = validChunks.filter((c: any) => c.formType === args.formType);
+      console.log(`[Convex Search] After formType filter: ${validChunks.length} chunks`);
     }
 
-    return validChunks;
+    // Return top results by score, up to limit
+    return validChunks.slice(0, limit);
   },
 });
 

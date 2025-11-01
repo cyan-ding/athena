@@ -51,13 +51,18 @@ export async function POST(req: NextRequest) {
 
     const questionEmbedding = embeddingResponse.data[0].embedding;
 
-    // Step 2: Perform vector search in Convex
-    const results = await convex.action(api.secFilings.searchFilingChunks, {
+    // Step 2: Perform HYBRID search (vector + keyword matching)
+    // This combines semantic similarity with exact keyword matching for better recall
+    const results = await convex.action(api.secFilings.hybridSearchFilingChunks, {
       ticker: tickerUpper,
-      embedding: questionEmbedding,
+      query: question, // For keyword search
+      embedding: questionEmbedding, // For vector search
       formType: formType === 'all' ? undefined : formType,
-      limit,
+      limit: limit,
+      minScore: 0.3, // Lower threshold for vector search - be permissive
     });
+
+    console.log(`[RAG Query] Hybrid search returned ${results?.length || 0} chunks`);
 
     // DEBUG: Write raw results to file for inspection
     try {
@@ -71,8 +76,17 @@ export async function POST(req: NextRequest) {
         question,
         formType,
         limit,
+        searchType: 'hybrid',
         resultsCount: results?.length || 0,
-        results: results || [],
+        results: results?.map((r: any) => ({
+          section: r.section,
+          formType: r.formType,
+          filingDate: r.filingDate,
+          hybridScore: r.hybridScore,
+          vectorScore: r.vectorScore,
+          keywordScore: r.keywordScore,
+          textPreview: r.text?.substring(0, 200) + '...',
+        })) || [],
       };
 
       // Create debug directory if it doesn't exist

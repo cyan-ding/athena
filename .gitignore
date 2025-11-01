@@ -48,3 +48,7 @@ next-env.d.ts
 # RAG debugging
 /debug-rag
 __pycache__/
+
+# Auth database
+auth.db
+auth.db-*

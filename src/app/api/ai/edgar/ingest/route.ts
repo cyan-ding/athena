@@ -99,11 +99,14 @@ function stripHTML(html: string): string {
 
 /**
  * Chunk text using LangChain's RecursiveCharacterTextSplitter
+ * Improved settings for better retrieval:
+ * - Larger chunks (2000 chars ~500 tokens) provide more context
+ * - More overlap (400 chars) ensures key information isn't lost at boundaries
  */
 async function chunkText(text: string): Promise<string[]> {
   const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1000, // Tokens roughly = characters/4, so ~250 tokens per chunk
-    chunkOverlap: 200, // Overlap to maintain context
+    chunkSize: 2000, // ~500 tokens per chunk - better for financial documents
+    chunkOverlap: 400, // 20% overlap to maintain context across boundaries
     separators: ['\n\n', '\n', '. ', ' ', ''],
   });
 

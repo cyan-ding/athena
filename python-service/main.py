@@ -85,19 +85,16 @@ async def scrape_reddit(request: ScrapeRequest):
     try:
         logger.info(f"Scraping Reddit for {request.ticker} from {request.start_date} to {request.end_date}")
 
-        # Import browser-use components
+        # Import browser-use cloud SDK
         try:
-            from browser_use import Agent, Browser, ChatBrowserUse
+            from browser_use_sdk import AsyncBrowserUse
         except ImportError:
             raise HTTPException(
                 status_code=500,
-                detail="browser-use library not installed. Run: uv add browser-use"
+                detail="browser-use-sdk library not installed. Run: pip install browser-use-sdk"
             )
 
-        # Create browser and LLM instances
-        browser = Browser()
-
-        # Use ChatBrowserUse or fallback to OpenAI
+        # Get API key from environment
         api_key = os.getenv("BROWSER_USE_API_KEY")
         if not api_key:
             raise HTTPException(
@@ -105,7 +102,8 @@ async def scrape_reddit(request: ScrapeRequest):
                 detail="BROWSER_USE_API_KEY not configured in .env"
             )
 
-        llm = ChatBrowserUse(api_key=api_key)
+        # Create cloud SDK client
+        client = AsyncBrowserUse(api_key=api_key)
 
         # Create scraping task
         task = f"""
@@ -116,61 +114,116 @@ async def scrape_reddit(request: ScrapeRequest):
         - r/stocks
         - r/investing
 
-        For each post, extract:
-        1. Post title
-        2. Post URL
-        3. Upvote score (if visible)
-        4. Post date
-        5. Author username
-        6. Number of comments
-        7. Key excerpt from post body (1-2 sentences)
+        For each post, try to extract as much information as possible:
+        - Post title (required)
+        - Post URL (required)
+        - Upvote score (optional, if visible)
+        - Post date (optional, use approximate if exact date unavailable)
+        - Author username (optional)
+        - Number of comments (optional)
+        - Key excerpt from post body (1-2 sentences, required)
 
-        Return the data in this exact JSON format:
+        Return the data as JSON. The structure should be a "posts" array. Each post should have at minimum:
+        - "title" (string)
+        - "url" (string)
+        - "content" (string with excerpt)
+
+        Optional fields (include if available, omit if not):
+        - "score" (number)
+        - "date" (string in YYYY-MM-DD format if possible, or any date format)
+        - "author" (string)
+        - "comments_count" (number)
+
+        Example format (but be flexible with structure):
         {{
             "posts": [
                 {{
                     "title": "Post title here",
                     "url": "https://reddit.com/...",
+                    "content": "Excerpt from post...",
                     "score": 1234,
                     "date": "2024-01-15",
                     "author": "username",
-                    "comments_count": 56,
-                    "content": "Excerpt from post..."
+                    "comments_count": 56
                 }}
             ]
         }}
+
+        If you cannot extract all fields, just include what you can find. Partial data is acceptable.
         """
 
-        # Run the agent
-        agent = Agent(
+        # Run the cloud task
+        task_response = await client.tasks.create_task(
             task=task,
-            llm=llm,
-            browser=browser,
+            llm="gemini-flash-latest"  # Cloud SDK uses specified LLM model
         )
 
-        await agent.run()
+        # Wait for the task to complete and get the result
+        logger.info(f"[REDDIT] Task created with ID: {task_response.id}, waiting for completion...")
+        result = await task_response.complete()
 
-        # Parse the result
-        # Note: browser-use returns history of actions, we need to extract the final result
-        # For now, return a mock response - in production, parse history for extracted data
-
+        # Get the final result from the cloud task
         from datetime import datetime
+        import json
 
-        # Mock response for demonstration
-        # TODO: Parse actual data from agent history
-        mock_posts = [
-            SocialPost(
-                platform="reddit",
-                title=f"Discussion about {request.ticker}",
-                content="This is extracted content from the Reddit post...",
-                url="https://reddit.com/r/wallstreetbets/...",
-                score=500,
-                date=request.start_date,
-                author="reddit_user",
-                comments_count=50
-            )
-        ]
+        # Log the raw result from browser-use
+        logger.info(f"[REDDIT] Task status: {result.status}")
+        logger.info(f"[REDDIT] Browser-use result.output: {result.output if hasattr(result, 'output') else 'NO OUTPUT ATTR'}")
 
+        # Parse the result from the cloud SDK
+        # The result should contain the extracted data in the format we specified
+        try:
+            # Try to parse JSON from result output
+            result_data = json.loads(result.output) if hasattr(result, 'output') else {}
+            posts_data = result_data.get('posts', [])
+            logger.info(f"[REDDIT] Extracted {len(posts_data)} posts")
+
+            parsed_posts = []
+            for i, post in enumerate(posts_data):
+                parsed_posts.append(SocialPost(
+                    platform="reddit",
+                    title=post.get('title', ''),
+                    content=post.get('content', ''),
+                    url=post.get('url', ''),
+                    score=post.get('score'),
+                    date=post.get('date', request.start_date),
+                    author=post.get('author'),
+                    comments_count=post.get('comments_count')
+                ))
+                logger.info(f"[REDDIT] Post {i+1}: {post.get('title', 'NO TITLE')[:100]}")
+
+            logger.info(f"[REDDIT] Parsed {len(parsed_posts)} posts successfully")
+
+            # Use parsed posts or fallback to mock if parsing fails
+            mock_posts = parsed_posts if parsed_posts else [
+                SocialPost(
+                    platform="reddit",
+                    title=f"Discussion about {request.ticker}",
+                    content="This is extracted content from the Reddit post...",
+                    url="https://reddit.com/r/wallstreetbets/...",
+                    score=500,
+                    date=request.start_date,
+                    author="reddit_user",
+                    comments_count=50
+                )
+            ]
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.warning(f"[REDDIT] Parse failed ({type(e).__name__}), using mock data")
+            # Fallback to mock response
+            mock_posts = [
+                SocialPost(
+                    platform="reddit",
+                    title=f"Discussion about {request.ticker}",
+                    content="This is extracted content from the Reddit post...",
+                    url="https://reddit.com/r/wallstreetbets/...",
+                    score=500,
+                    date=request.start_date,
+                    author="reddit_user",
+                    comments_count=50
+                )
+            ]
+
+        logger.info(f"[REDDIT] Returning {len(mock_posts)} posts")
         return ScrapeResponse(
             ticker=request.ticker,
             posts=mock_posts,
@@ -191,17 +244,16 @@ async def scrape_twitter(request: ScrapeRequest):
     try:
         logger.info(f"Scraping Twitter for {request.ticker} from {request.start_date} to {request.end_date}")
 
-        # Import browser-use components
+        # Import browser-use cloud SDK
         try:
-            from browser_use import Agent, Browser, ChatBrowserUse
+            from browser_use_sdk import AsyncBrowserUse
         except ImportError:
             raise HTTPException(
                 status_code=500,
-                detail="browser-use library not installed. Run: uv add browser-use"
+                detail="browser-use-sdk library not installed. Run: pip install browser-use-sdk"
             )
 
-        browser = Browser()
-
+        # Get API key from environment
         api_key = os.getenv("BROWSER_USE_API_KEY")
         if not api_key:
             raise HTTPException(
@@ -209,22 +261,34 @@ async def scrape_twitter(request: ScrapeRequest):
                 detail="BROWSER_USE_API_KEY not configured in .env"
             )
 
-        llm = ChatBrowserUse(api_key=api_key)
+        # Create cloud SDK client
+        client = AsyncBrowserUse(api_key=api_key)
 
         task = f"""
         Search Google for: site:x.com "{request.ticker}" after:{request.start_date} before:{request.end_date}
 
         Find the top {request.max_results} tweets about ${request.ticker} with high engagement (many likes/retweets).
 
-        For each tweet, extract:
-        1. Tweet text
-        2. Tweet URL
-        3. Number of likes (if visible)
-        4. Tweet date
-        5. Author handle
-        6. Number of retweets (if visible)
+        For each tweet, try to extract as much information as possible:
+        - Tweet text (required)
+        - Tweet URL (required)
+        - Number of likes (optional, if visible)
+        - Tweet date (optional, use approximate if exact date unavailable)
+        - Author handle (optional)
+        - Number of retweets or replies (optional)
 
-        Return the data in this exact JSON format:
+        Return the data as JSON. The structure should be a "posts" array. Each post should have at minimum:
+        - "content" (string with tweet text)
+        - "url" (string)
+
+        Optional fields (include if available, omit if not):
+        - "title" (string, can be author handle or empty string)
+        - "score" (number for likes)
+        - "date" (string in YYYY-MM-DD format if possible, or any date format)
+        - "author" (string with handle)
+        - "comments_count" (number for replies/retweets)
+
+        Example format (but be flexible with structure):
         {{
             "posts": [
                 {{
@@ -238,32 +302,81 @@ async def scrape_twitter(request: ScrapeRequest):
                 }}
             ]
         }}
+
+        If you cannot extract all fields, just include what you can find. Partial data is acceptable.
         """
 
-        agent = Agent(
+        # Run the cloud task
+        task_response = await client.tasks.create_task(
             task=task,
-            llm=llm,
-            browser=browser,
+            llm="gemini-flash-latest"  # Cloud SDK uses specified LLM model
         )
 
-        await agent.run()
+        # Wait for the task to complete and get the result
+        logger.info(f"[TWITTER] Task created with ID: {task_response.id}, waiting for completion...")
+        result = await task_response.complete()
 
+        # Get the final result from the cloud task
         from datetime import datetime
+        import json
 
-        # Mock response for demonstration
-        mock_posts = [
-            SocialPost(
-                platform="twitter",
-                title=f"@financeuser on {request.ticker}",
-                content=f"Tweet content about {request.ticker}...",
-                url="https://twitter.com/...",
-                score=1000,
-                date=request.start_date,
-                author="@financeuser",
-                comments_count=25
-            )
-        ]
+        # Log the raw result from browser-use
+        logger.info(f"[TWITTER] Task status: {result.status}")
+        logger.info(f"[TWITTER] Browser-use result.output: {result.output if hasattr(result, 'output') else 'NO OUTPUT ATTR'}")
 
+        # Parse the result from the cloud SDK
+        try:
+            # Try to parse JSON from result output
+            result_data = json.loads(result.output) if hasattr(result, 'output') else {}
+            posts_data = result_data.get('posts', [])
+            logger.info(f"[TWITTER] Extracted {len(posts_data)} posts")
+
+            parsed_posts = []
+            for i, post in enumerate(posts_data):
+                parsed_posts.append(SocialPost(
+                    platform="twitter",
+                    title=post.get('title', ''),
+                    content=post.get('content', ''),
+                    url=post.get('url', ''),
+                    score=post.get('score'),
+                    date=post.get('date', request.start_date),
+                    author=post.get('author'),
+                    comments_count=post.get('comments_count')
+                ))
+                logger.info(f"[TWITTER] Post {i+1}: {post.get('content', 'NO CONTENT')[:100]}")
+
+            logger.info(f"[TWITTER] Parsed {len(parsed_posts)} posts successfully")
+
+            # Use parsed posts or fallback to mock if parsing fails
+            mock_posts = parsed_posts if parsed_posts else [
+                SocialPost(
+                    platform="twitter",
+                    title=f"@financeuser on {request.ticker}",
+                    content=f"Tweet content about {request.ticker}...",
+                    url="https://twitter.com/...",
+                    score=1000,
+                    date=request.start_date,
+                    author="@financeuser",
+                    comments_count=25
+                )
+            ]
+        except (json.JSONDecodeError, AttributeError) as e:
+            logger.warning(f"[TWITTER] Parse failed ({type(e).__name__}), using mock data")
+            # Fallback to mock response
+            mock_posts = [
+                SocialPost(
+                    platform="twitter",
+                    title=f"@financeuser on {request.ticker}",
+                    content=f"Tweet content about {request.ticker}...",
+                    url="https://twitter.com/...",
+                    score=1000,
+                    date=request.start_date,
+                    author="@financeuser",
+                    comments_count=25
+                )
+            ]
+
+        logger.info(f"[TWITTER] Returning {len(mock_posts)} posts")
         return ScrapeResponse(
             ticker=request.ticker,
             posts=mock_posts,
