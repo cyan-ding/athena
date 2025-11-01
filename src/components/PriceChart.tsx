@@ -168,6 +168,12 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
           setSelectionBox({ left, top, width, height });
           setIsSelecting(false);
           setShowQuestionInput(true);
+        } else {
+          // If coordinate is outside valid range, clear the selection
+          setSelectedRange(null);
+          setSelectionBox(null);
+          setIsSelecting(false);
+          setShowQuestionInput(false);
         }
         dragStart = null;
       }
