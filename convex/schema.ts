@@ -55,4 +55,34 @@ export default defineSchema({
   })
     .index("by_ticker", ["ticker"])
     .index("by_ticker_timeframe", ["ticker", "timeframe"]),
+
+  // SEC filing chunks with vector embeddings for RAG
+  secFilingChunks: defineTable({
+    // Filing metadata
+    ticker: v.string(),
+    cik: v.string(),
+    formType: v.string(), // "10-K", "10-Q", "8-K"
+    filingDate: v.string(), // YYYY-MM-DD
+    accessionNumber: v.string(),
+
+    // Content
+    section: v.string(), // "Item 1A - Risk Factors", "Item 7 - MD&A", etc.
+    chunkIndex: v.number(), // Order within the section
+    text: v.string(), // The actual text content
+
+    // Vector embedding (OpenAI text-embedding-3-small = 1536 dimensions)
+    embedding: v.array(v.float64()),
+
+    // Metadata
+    url: v.string(), // Link to original filing on SEC website
+    createdAt: v.number(),
+  })
+    .index("by_ticker", ["ticker"])
+    .index("by_ticker_form", ["ticker", "formType"])
+    .index("by_filing", ["ticker", "accessionNumber"])
+    .vectorIndex("by_embedding", {
+      vectorField: "embedding",
+      dimensions: 1536,
+      filterFields: ["ticker", "formType", "section"],
+    }),
 });

@@ -4,6 +4,8 @@ import { useState, useEffect } from "react";
 import { PriceChart } from "@/components/PriceChart";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type TimeRange = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
 
@@ -21,6 +23,10 @@ export default function Home() {
   const [chatResponse, setChatResponse] = useState<any>(null);
   const [selectedTimeStart, setSelectedTimeStart] = useState<number | null>(null);
   const [selectedTimeEnd, setSelectedTimeEnd] = useState<number | null>(null);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [currentTimespan, setCurrentTimespan] = useState<"hour" | "day">("day");
+  const [earliestFetchedTimestamp, setEarliestFetchedTimestamp] = useState<number | null>(null);
+  const [showCitations, setShowCitations] = useState(false);
 
   // Load default ticker on mount
   useEffect(() => {
@@ -36,36 +42,45 @@ export default function Home() {
     try {
       const to = new Date().toISOString().split("T")[0];
       let daysBack = 180;
+      let bufferDays = 60; // Extra buffer to pre-fetch
       let timespan = "day";
 
       switch (timeRange) {
         case "1D":
           daysBack = 1;
+          bufferDays = 1;
           timespan = "hour";
           break;
         case "1W":
           daysBack = 7;
+          bufferDays = 3;
           timespan = "hour";
           break;
         case "1M":
           daysBack = 30;
+          bufferDays = 15;
           timespan = "day";
           break;
         case "3M":
           daysBack = 90;
+          bufferDays = 30;
           timespan = "day";
           break;
         case "6M":
           daysBack = 180;
+          bufferDays = 60;
           timespan = "day";
           break;
         case "1Y":
           daysBack = 365;
+          bufferDays = 90;
           timespan = "day";
           break;
       }
 
-      const from = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000)
+      // Fetch main data + buffer in a single request
+      const totalDays = daysBack + bufferDays;
+      const from = new Date(Date.now() - totalDays * 24 * 60 * 60 * 1000)
         .toISOString()
         .split("T")[0];
 
@@ -79,14 +94,99 @@ export default function Home() {
       }
 
       const result = await response.json();
-      setChartData(result.data || []);
+      const fetchedData = result.data || [];
+
+      setChartData(fetchedData);
       setTicker(symbol.toUpperCase());
       setSelectedTimeRange(timeRange);
+      setCurrentTimespan(timespan as "hour" | "day");
+
+      // Track the earliest timestamp we've fetched
+      if (fetchedData.length > 0) {
+        const earliest = Math.min(...fetchedData.map((d: any) => d.timestamp));
+        setEarliestFetchedTimestamp(earliest);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleLoadMoreData = async (earliestTimestamp: number) => {
+    if (isLoadingMore || !ticker) return;
+
+    // Check if we've already fetched data earlier than this timestamp
+    // If so, don't re-fetch (caching mechanism)
+    if (earliestFetchedTimestamp && earliestTimestamp >= earliestFetchedTimestamp) {
+      console.log("Data already cached, skipping fetch");
+      return;
+    }
+
+    setIsLoadingMore(true);
+
+    try {
+      // Calculate the time range based on current timespan
+      let daysBack = 30;
+      if (currentTimespan === "hour") {
+        daysBack = 7; // Load another week for hourly data
+      } else {
+        // For daily data, load based on current time range
+        switch (selectedTimeRange) {
+          case "1M":
+          case "3M":
+            daysBack = 30;
+            break;
+          case "6M":
+            daysBack = 60;
+            break;
+          case "1Y":
+            daysBack = 90;
+            break;
+          default:
+            daysBack = 30;
+        }
+      }
+
+      // Calculate from/to dates for the previous period
+      const earliestDate = new Date(earliestTimestamp);
+      const to = new Date(earliestTimestamp - 24 * 60 * 60 * 1000).toISOString().split("T")[0]; // One day before earliest
+      const from = new Date(earliestDate.getTime() - daysBack * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .split("T")[0];
+
+      const response = await fetch(
+        `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}`
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to fetch historical data");
+      }
+
+      const result = await response.json();
+
+      // Prepend new data to existing data, removing duplicates
+      if (result.data && result.data.length > 0) {
+        const newData = result.data;
+        const existingTimestamps = new Set(chartData.map(d => d.timestamp));
+        const uniqueNewData = newData.filter((d: any) => !existingTimestamps.has(d.timestamp));
+
+        if (uniqueNewData.length > 0) {
+          const updatedData = [...uniqueNewData, ...chartData];
+          setChartData(updatedData);
+
+          // Update the earliest fetched timestamp
+          const newEarliest = Math.min(...updatedData.map((d: any) => d.timestamp));
+          setEarliestFetchedTimestamp(newEarliest);
+        }
+      }
+    } catch (err) {
+      console.error("Error loading more data:", err);
+      // Don't show error to user for background loading
+    } finally {
+      setIsLoadingMore(false);
     }
   };
 
@@ -111,11 +211,47 @@ export default function Home() {
     }
   };
 
-  const handleTimeRangeSelect = (start: number, end: number, userQuestion: string) => {
+  const handleTimeRangeSelect = async (start: number, end: number, userQuestion: string) => {
     console.log("Selected time range:", { start, end, question: userQuestion });
     setSelectedTimeStart(start);
     setSelectedTimeEnd(end);
     setQuestion(userQuestion);
+
+    // Automatically submit the query
+    setChatLoading(true);
+    setChatResponse(null);
+    setError(null);
+
+    try {
+      // Calculate time range
+      const startDate = new Date(start * 1000).toISOString().split('T')[0];
+      const endDate = new Date(end * 1000).toISOString().split('T')[0];
+
+      const response = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: userQuestion,
+          ticker,
+          startDate,
+          endDate,
+          useBrowserUse,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to get answer');
+      }
+
+      const data = await response.json();
+      setChatResponse(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+      console.error('Chat error:', err);
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const handleRemoveFromWatchlist = (tickerToRemove: string) => {
@@ -174,11 +310,11 @@ export default function Home() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    <div className="flex h-screen flex-col bg-background">
       {/* Header */}
-      <header className="border-b px-6 py-4">
+      <header className="border-b px-6 py-4 flex-shrink-0">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center">
             <img
               src="/file.svg"
               alt="Athena Logo"
@@ -273,6 +409,8 @@ export default function Home() {
                   ticker={ticker}
                   data={chartData}
                   onTimeRangeSelect={handleTimeRangeSelect}
+                  onLoadMoreData={handleLoadMoreData}
+                  isLoadingMore={isLoadingMore}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center rounded bg-muted/20">
@@ -294,7 +432,7 @@ export default function Home() {
         </div>
 
         {/* Right Sidebar - AI Chat */}
-        <aside className="w-96 rounded-lg border flex flex-col overflow-hidden flex-shrink-0">
+        <aside className="w-96 rounded-lg border flex flex-col flex-shrink-0 overflow-hidden">
           {/* Chat Header */}
           <div className="border-b p-4 flex-shrink-0">
             <div className="flex items-center justify-between">
@@ -341,61 +479,122 @@ export default function Home() {
                   <div className="text-xs font-semibold text-muted-foreground mb-2">
                     ANSWER
                   </div>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                    {chatResponse.answer}
-                  </p>
+                  <div className="text-sm leading-relaxed prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-ul:text-foreground prose-ol:text-foreground prose-li:text-foreground">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {chatResponse.answer}
+                    </ReactMarkdown>
+                  </div>
                 </div>
 
                 {/* Sources */}
                 {chatResponse.sources && chatResponse.sources.length > 0 && (
                   <div className="space-y-3">
-                    <div className="text-xs font-semibold text-muted-foreground">
-                      SOURCES ({chatResponse.sources.length})
-                    </div>
-                    {chatResponse.sources.map((source: any) => (
-                      <div
-                        key={source.id}
-                        className="rounded-lg border p-3 hover:bg-muted/20 transition-colors"
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="inline-flex items-center justify-center w-5 h-5 text-xs font-bold rounded-full bg-primary text-primary-foreground">
-                                  {source.id}
-                                </span>
-                                <span className="text-xs font-medium text-muted-foreground">
-                                  {source.type.toUpperCase()}
-                                </span>
+                    {(() => {
+                      // Separate Perplexity citations from other sources
+                      const perplexitySources = chatResponse.sources.filter((s: any) => s.type === 'perplexity');
+                      const otherSources = chatResponse.sources.filter((s: any) => s.type !== 'perplexity');
+
+                      return (
+                        <>
+                          {/* Non-Perplexity Sources (EDGAR, Social, etc.) */}
+                          {otherSources.length > 0 && (
+                            <>
+                              <div className="text-xs font-semibold text-muted-foreground">
+                                PRIMARY SOURCES ({otherSources.length})
                               </div>
-                              <div className="mt-1 font-medium text-sm">
-                                {source.title}
-                              </div>
-                              {source.date && (
-                                <div className="text-xs text-muted-foreground mt-1">
-                                  {source.date}
+                              {otherSources.map((source: any) => (
+                                <div
+                                  key={source.id}
+                                  className="rounded-lg border p-3 hover:bg-muted/20 transition-colors"
+                                >
+                                  <div className="space-y-2">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="flex-1">
+                                        <div className="flex items-center gap-2">
+                                          <span className="inline-flex items-center justify-center w-5 h-5 text-xs font-bold rounded-full bg-primary text-primary-foreground">
+                                            {source.id}
+                                          </span>
+                                          <span className="text-xs font-medium text-muted-foreground">
+                                            {source.type.toUpperCase()}
+                                          </span>
+                                        </div>
+                                        <div className="mt-1 font-medium text-sm">
+                                          {source.title}
+                                        </div>
+                                        {source.date && (
+                                          <div className="text-xs text-muted-foreground mt-1">
+                                            {source.date}
+                                          </div>
+                                        )}
+                                        {source.content && source.content.length > 0 && (
+                                          <div className="text-xs text-muted-foreground mt-2 line-clamp-2">
+                                            {source.content}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                    {source.url && (
+                                      <a
+                                        href={source.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-xs text-blue-600 hover:underline flex items-center gap-1"
+                                      >
+                                        View source ↗
+                                      </a>
+                                    )}
+                                  </div>
                                 </div>
-                              )}
-                              {source.content && source.content.length > 0 && (
-                                <div className="text-xs text-muted-foreground mt-2 line-clamp-2">
-                                  {source.content}
+                              ))}
+                            </>
+                          )}
+
+                          {/* Perplexity Citations - Collapsible */}
+                          {perplexitySources.length > 0 && (
+                            <div className="border rounded-lg">
+                              <button
+                                onClick={() => setShowCitations(!showCitations)}
+                                className="w-full p-3 text-left hover:bg-muted/20 transition-colors flex items-center justify-between"
+                              >
+                                <span className="text-xs font-semibold text-muted-foreground">
+                                  View ({perplexitySources.length}) Web Citations
+                                </span>
+                                <span className="text-muted-foreground">
+                                  {showCitations ? '▲' : '▼'}
+                                </span>
+                              </button>
+                              {showCitations && (
+                                <div className="border-t p-3 space-y-2">
+                                  {perplexitySources.map((source: any) => (
+                                    <div
+                                      key={source.id}
+                                      className="rounded border p-2 text-xs hover:bg-muted/10"
+                                    >
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold rounded-full bg-muted text-muted-foreground">
+                                          {source.id}
+                                        </span>
+                                        <span className="font-medium">{source.title}</span>
+                                      </div>
+                                      {source.url && (
+                                        <a
+                                          href={source.url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-blue-600 hover:underline text-[10px] ml-6"
+                                        >
+                                          {source.url} ↗
+                                        </a>
+                                      )}
+                                    </div>
+                                  ))}
                                 </div>
                               )}
                             </div>
-                          </div>
-                          {source.url && (
-                            <a
-                              href={source.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-blue-600 hover:underline flex items-center gap-1"
-                            >
-                              View source ↗
-                            </a>
                           )}
-                        </div>
-                      </div>
-                    ))}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 

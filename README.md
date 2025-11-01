@@ -1,36 +1,116 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Athena Browser-Use Service
 
-## Getting Started
+Python FastAPI microservice for real-time social media scraping using browser-use.
 
-First, run the development server:
+## Setup
 
+1. Install dependencies:
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -e .
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Install Chromium for browser-use:
+```bash
+uvx browser-use install
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+3. Configure environment variables:
+```bash
+cp .env.example .env
+# Edit .env and add your API keys
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+4. Get API keys:
+   - Browser-Use: https://browser-use.com (get $10 free credit)
+   - OpenAI: https://platform.openai.com/api-keys (if using as fallback)
 
-## Learn More
+## Running the Service
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+# Development mode (auto-reload)
+python main.py
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+# Or with uvicorn directly
+uvicorn main:app --reload --port 8001
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Endpoints
 
-## Deploy on Vercel
+### Health Check
+```bash
+GET http://localhost:8001/health
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Scrape Reddit
+```bash
+POST http://localhost:8001/scrape/reddit
+Content-Type: application/json
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+{
+  "ticker": "NVDA",
+  "start_date": "2024-01-01",
+  "end_date": "2024-01-31",
+  "max_results": 5
+}
+```
+
+### Scrape Twitter/X
+```bash
+POST http://localhost:8001/scrape/twitter
+Content-Type: application/json
+
+{
+  "ticker": "NVDA",
+  "start_date": "2024-01-01",
+  "end_date": "2024-01-31",
+  "max_results": 5
+}
+```
+
+### Scrape Both Platforms
+```bash
+POST http://localhost:8001/scrape/both
+Content-Type: application/json
+
+{
+  "ticker": "NVDA",
+  "start_date": "2024-01-01",
+  "end_date": "2024-01-31",
+  "max_results": 5
+}
+```
+
+## Response Format
+
+```json
+{
+  "ticker": "NVDA",
+  "posts": [
+    {
+      "platform": "reddit",
+      "title": "Post title",
+      "content": "Post excerpt...",
+      "url": "https://reddit.com/...",
+      "score": 1234,
+      "date": "2024-01-15",
+      "author": "username",
+      "comments_count": 56
+    }
+  ],
+  "source": "reddit",
+  "timestamp": "2024-01-31T12:00:00"
+}
+```
+
+## Notes
+
+- Browser-use requires Python 3.11+
+- Scraping takes 5-15 seconds per request
+- Use sparingly to avoid rate limits
+- Results are currently mocked - see TODOs in main.py for parsing actual browser-use output

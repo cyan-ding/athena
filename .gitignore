@@ -44,3 +44,7 @@ convex/_generated/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# RAG debugging
+/debug-rag
+__pycache__/

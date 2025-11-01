@@ -6,7 +6,7 @@ Provides endpoints for scraping Reddit and Twitter/X for financial sentiment.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -148,7 +148,7 @@ async def scrape_reddit(request: ScrapeRequest):
             browser=browser,
         )
 
-        history = await agent.run()
+        await agent.run()
 
         # Parse the result
         # Note: browser-use returns history of actions, we need to extract the final result
@@ -212,7 +212,7 @@ async def scrape_twitter(request: ScrapeRequest):
         llm = ChatBrowserUse(api_key=api_key)
 
         task = f"""
-        Search Google for: site:twitter.com OR site:x.com "{request.ticker}" OR "${request.ticker}" after:{request.start_date} before:{request.end_date}
+        Search Google for: site:x.com "{request.ticker}" after:{request.start_date} before:{request.end_date}
 
         Find the top {request.max_results} tweets about ${request.ticker} with high engagement (many likes/retweets).
 
@@ -246,7 +246,7 @@ async def scrape_twitter(request: ScrapeRequest):
             browser=browser,
         )
 
-        history = await agent.run()
+        await agent.run()
 
         from datetime import datetime
 

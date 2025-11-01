@@ -22,9 +22,11 @@ interface PriceChartProps {
     volume: number;
   }>;
   onTimeRangeSelect?: (start: number, end: number, question: string) => void;
+  onLoadMoreData?: (earliestTimestamp: number) => Promise<void>;
+  isLoadingMore?: boolean;
 }
 
-export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps) {
+export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, isLoadingMore }: PriceChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -33,7 +35,10 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [question, setQuestion] = useState("");
   const [showQuestionInput, setShowQuestionInput] = useState(false);
+  const isLoadingRef = useRef(false);
+  const lastLoadTriggerTime = useRef<number | null>(null);
 
+  // Chart initialization - only runs once on mount
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -180,7 +185,58 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
       }
       chart.remove();
     };
-  }, []);
+  }, []); // Empty dependency array - only run once on mount
+
+  // Separate effect for handling visible time range changes
+  useEffect(() => {
+    if (!chartRef.current || !onLoadMoreData) return;
+
+    const handleVisibleTimeRangeChange = () => {
+      if (isLoadingRef.current || isLoadingMore || data.length === 0) return;
+
+      const timeScale = chartRef.current!.timeScale();
+      const visibleRange = timeScale.getVisibleRange();
+
+      if (!visibleRange) return;
+
+      // Get the earliest timestamp in our current data (in seconds)
+      const earliestDataTime = Math.min(...data.map(d => d.timestamp / 1000));
+
+      // Convert Time to number for comparison
+      const visibleFrom = Number(visibleRange.from);
+
+      // Calculate the total time range of current data
+      const latestDataTime = Math.max(...data.map(d => d.timestamp / 1000));
+      const dataTimeSpan = latestDataTime - earliestDataTime;
+
+      // Only trigger load if:
+      // 1. User has scrolled to view area within 20% of the earliest data point
+      // 2. We haven't triggered a load at this threshold yet (or it's significantly earlier)
+      const threshold = earliestDataTime + (dataTimeSpan * 0.2);
+
+      if (visibleFrom <= threshold) {
+        // Check if we've already loaded at this point or further back
+        if (lastLoadTriggerTime.current === null ||
+            earliestDataTime < lastLoadTriggerTime.current - (dataTimeSpan * 0.3)) {
+
+          isLoadingRef.current = true;
+          lastLoadTriggerTime.current = earliestDataTime;
+
+          onLoadMoreData(data[0].timestamp)
+            .finally(() => {
+              isLoadingRef.current = false;
+            });
+        }
+      }
+    };
+
+    const chart = chartRef.current;
+    chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleTimeRangeChange);
+
+    return () => {
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleTimeRangeChange);
+    };
+  }, [data, onLoadMoreData, isLoadingMore]);
 
   useEffect(() => {
     if (!candlestickSeriesRef.current || !data.length) return;
@@ -193,12 +249,24 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
       close: bar.close,
     }));
 
+    // Store current visible range if we're loading more data
+    let currentVisibleRange = null;
+    if (chartRef.current && isLoadingMore) {
+      currentVisibleRange = chartRef.current.timeScale().getVisibleRange();
+    }
+
     candlestickSeriesRef.current.setData(chartData);
 
     if (chartRef.current) {
-      chartRef.current.timeScale().fitContent();
+      // If we're loading more data, restore the visible range to prevent jumping
+      if (isLoadingMore && currentVisibleRange) {
+        chartRef.current.timeScale().setVisibleRange(currentVisibleRange);
+      } else {
+        // Otherwise, fit content for initial load
+        chartRef.current.timeScale().fitContent();
+      }
     }
-  }, [data]);
+  }, [data, isLoadingMore]);
 
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -212,8 +280,32 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
   }, [showQuestionInput]);
 
   const handleAskQuestion = () => {
-    if (selectedRange && question.trim() && onTimeRangeSelect) {
-      onTimeRangeSelect(selectedRange.start, selectedRange.end, question);
+    if (selectedRange && onTimeRangeSelect) {
+      // Get price data for the selected time range
+      const rangeData = data.filter(d => {
+        const timestamp = d.timestamp / 1000;
+        return timestamp >= selectedRange.start && timestamp <= selectedRange.end;
+      });
+
+      // Calculate price change info
+      let priceInfo = "";
+      if (rangeData.length > 0) {
+        const firstPrice = rangeData[0].close;
+        const lastPrice = rangeData[rangeData.length - 1].close;
+        const priceChange = lastPrice - firstPrice;
+        const percentChange = (priceChange / firstPrice) * 100;
+        const highPrice = Math.max(...rangeData.map(d => d.high));
+        const lowPrice = Math.min(...rangeData.map(d => d.low));
+
+        priceInfo = `Price: $${firstPrice.toFixed(2)} → $${lastPrice.toFixed(2)} (${percentChange > 0 ? '+' : ''}${percentChange.toFixed(2)}%). High: $${highPrice.toFixed(2)}, Low: $${lowPrice.toFixed(2)}.`;
+      }
+
+      // Combine user question with price info if there is a question, otherwise just use price info
+      const enhancedQuestion = question.trim()
+        ? `${question.trim()} [Time range: ${new Date(selectedRange.start * 1000).toLocaleDateString()} - ${new Date(selectedRange.end * 1000).toLocaleDateString()}. ${priceInfo}]`
+        : `What happened during ${new Date(selectedRange.start * 1000).toLocaleDateString()} - ${new Date(selectedRange.end * 1000).toLocaleDateString()}? ${priceInfo}`;
+
+      onTimeRangeSelect(selectedRange.start, selectedRange.end, enhancedQuestion);
       setQuestion("");
       setShowQuestionInput(false);
       setSelectionBox(null);
@@ -241,6 +333,7 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
         <div className="text-sm text-muted-foreground">
           {ticker} • Daily Chart
           {isSelecting && <span className="ml-2 text-blue-600">(Selecting...)</span>}
+          {isLoadingMore && <span className="ml-2 text-blue-600">(Loading more data...)</span>}
         </div>
         {selectedRange && !showQuestionInput && (
           <button
@@ -286,7 +379,7 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
             <div className="flex gap-2">
               <Input
                 type="text"
-                placeholder="e.g., Why did the price spike?"
+                placeholder="Optional: Add a specific question..."
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAskQuestion()}
@@ -295,7 +388,6 @@ export function PriceChart({ ticker, data, onTimeRangeSelect }: PriceChartProps)
               />
               <Button
                 onClick={handleAskQuestion}
-                disabled={!question.trim()}
                 size="sm"
               >
                 Ask
