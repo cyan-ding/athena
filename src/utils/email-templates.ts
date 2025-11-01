@@ -176,7 +176,8 @@ export function buildPriceAlertEmail(data: PriceAlertEmailData) {
         Just reply to this email with:
       </p>
       <ul style="margin: 5px 0; padding-left: 20px; color: #495057;">
-        <li><strong>"yes"</strong> to buy</li>
+        <li><strong>"yes"</strong> to buy (default: 50 shares)</li>
+        <li><strong>"yes 100"</strong> to buy 100 shares</li>
         <li><strong>"no"</strong> to skip this alert</li>
       </ul>
       ${
@@ -227,8 +228,8 @@ ${
 }
 
 ${isBigDrop
-  ? "Ready to buy the dip? Reply \"yes\" to buy or \"no\" to skip."
-  : "Want to add to your position? Reply \"yes\" to buy or \"no\" to skip."
+  ? "Ready to buy the dip? Reply \"yes\" to buy (default: 50 shares), \"yes 100\" to buy 100 shares, or \"no\" to skip."
+  : "Want to add to your position? Reply \"yes\" to buy (default: 50 shares), \"yes 100\" to buy 100 shares, or \"no\" to skip."
 }
 
 ---

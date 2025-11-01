@@ -222,6 +222,39 @@ export const hybridSearchFilingChunks = action({
 });
 
 /**
+ * Enhanced hybrid search with query expansion
+ * Generates multiple query variations to improve retrieval
+ * Note: Query expansion is handled on the Next.js API side using OpenAI
+ */
+export const hybridSearchWithExpansion = action({
+  args: {
+    ticker: v.string(),
+    query: v.string(),
+    formType: v.optional(v.string()),
+    limit: v.optional(v.number()),
+    minScore: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<any> => {
+    const limit = args.limit ?? 5;
+
+    // Note: Query generation happens on the Next.js side via OpenAI API
+    // This action receives the original query and will be called multiple times
+    // with different query variations from the caller
+
+    // For now, just call the standard hybrid search
+    // The query expansion logic will be in the Next.js API route
+    return ctx.runAction(api.secFilings.hybridSearchFilingChunks, {
+      ticker: args.ticker,
+      query: args.query,
+      embedding: [], // Will be generated in the caller
+      formType: args.formType,
+      limit,
+      minScore: args.minScore,
+    });
+  },
+});
+
+/**
  * Vector search for relevant SEC filing chunks
  */
 export const searchFilingChunks = action({

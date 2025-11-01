@@ -6,7 +6,8 @@ export async function GET(request: NextRequest) {
   const ticker = searchParams.get("ticker");
   const from = searchParams.get("from");
   const to = searchParams.get("to");
-  const timespan = searchParams.get("timespan") as "day" | "hour" | "minute";
+  const timespan = (searchParams.get("timespan") || "day") as "day" | "hour" | "minute";
+  const multiplier = parseInt(searchParams.get("multiplier") || "1", 10);
 
   if (!ticker || !from || !to) {
     return NextResponse.json(
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const data = await getAggregates(ticker, from, to, timespan || "day");
+    const data = await getAggregates(ticker, from, to, timespan || "day", multiplier);
     return NextResponse.json({ ticker, data });
   } catch (error) {
     console.error("Market data fetch error:", error);

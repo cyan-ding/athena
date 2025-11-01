@@ -9,6 +9,9 @@ import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSession, signIn, signUp, signOut } from "@/lib/auth";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 
 type TimeRange = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
 
@@ -31,16 +34,14 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>("6M");
   const [question, setQuestion] = useState("");
-  const [watchlist, setWatchlist] = useState<string[]>(["NVDA", "TSLA", "AAPL"]);
-  const [useBrowserUse, setUseBrowserUse] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatResponse, setChatResponse] = useState<any>(null);
   const [selectedTimeStart, setSelectedTimeStart] = useState<number | null>(null);
   const [selectedTimeEnd, setSelectedTimeEnd] = useState<number | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [currentTimespan, setCurrentTimespan] = useState<"hour" | "day">("day");
+  const [currentTimespan, setCurrentTimespan] = useState<"minute" | "hour" | "day">("day");
+  const [currentMultiplier, setCurrentMultiplier] = useState<number>(1);
   const [earliestFetchedTimestamp, setEarliestFetchedTimestamp] = useState<number | null>(null);
-  const [showCitations, setShowCitations] = useState(false);
   const [currentPrice, setCurrentPrice] = useState<number | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [collationProgress, setCollationProgress] = useState<{
@@ -49,6 +50,110 @@ export default function Home() {
     total: number;
   } | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const [currentSessionId, setCurrentSessionId] = useState<Id<"chatSessions"> | null>(null);
+  const [showWarnings, setShowWarnings] = useState(true);
+
+  // Convex queries and mutations
+  const userId = session?.user?.id || "guest";
+
+  // Watchlist from Convex
+  const watchlistData = useQuery(api.watchlists.get, { userId });
+  const watchlist = watchlistData || ["NVDA", "TSLA", "AAPL"]; // Fallback to defaults
+  const addToWatchlist = useMutation(api.watchlists.addTicker);
+  const removeFromWatchlist = useMutation(api.watchlists.removeTicker);
+
+  // User preferences from Convex
+  const userPrefs = useQuery(api.userPreferences.get, { userId });
+  const updatePreferences = useMutation(api.userPreferences.update);
+
+  // Chat sessions from Convex
+  const chatSessions = useQuery(api.chatSessions.list, { userId });
+  const addChatMessage = useMutation(api.chatSessions.addMessage);
+  const createChatSession = useMutation(api.chatSessions.create);
+
+  // UI preferences (synced with Convex)
+  const [useBrowserUse, setUseBrowserUse] = useState(userPrefs?.useBrowserUse ?? false);
+  const [showCitations, setShowCitations] = useState(userPrefs?.showCitations ?? false);
+
+  // Sync UI preferences with Convex when they change
+  useEffect(() => {
+    if (userPrefs !== undefined) {
+      setUseBrowserUse(userPrefs?.useBrowserUse ?? false);
+      setShowCitations(userPrefs?.showCitations ?? false);
+    }
+  }, [userPrefs]);
+
+  // Load user preferences on mount or when they change
+  useEffect(() => {
+    if (userPrefs?.defaultTicker && ticker === "NVDA") {
+      setTicker(userPrefs.defaultTicker);
+    }
+    if (userPrefs?.defaultTimeRange && selectedTimeRange === "6M") {
+      setSelectedTimeRange(userPrefs.defaultTimeRange as TimeRange);
+    }
+  }, [userPrefs]);
+
+  // Persist UI preferences to Convex when they change
+  useEffect(() => {
+    if (userPrefs !== undefined) {
+      // Only update if value has actually changed
+      if (userPrefs?.useBrowserUse !== useBrowserUse) {
+        updatePreferences({ userId, useBrowserUse });
+      }
+    }
+  }, [useBrowserUse]);
+
+  useEffect(() => {
+    if (userPrefs !== undefined) {
+      if (userPrefs?.showCitations !== showCitations) {
+        updatePreferences({ userId, showCitations });
+      }
+    }
+  }, [showCitations]);
+
+  // Persist ticker and time range preferences when they change
+  // Use a ref to prevent infinite loops and only save after initial load
+  const hasLoadedPrefs = useRef(false);
+
+  useEffect(() => {
+    if (userPrefs !== undefined) {
+      hasLoadedPrefs.current = true;
+    }
+  }, [userPrefs]);
+
+  useEffect(() => {
+    if (hasLoadedPrefs.current && userPrefs !== undefined && ticker !== userPrefs?.defaultTicker) {
+      updatePreferences({ userId, defaultTicker: ticker });
+    }
+  }, [ticker]);
+
+  useEffect(() => {
+    if (hasLoadedPrefs.current && userPrefs !== undefined && selectedTimeRange !== userPrefs?.defaultTimeRange) {
+      updatePreferences({ userId, defaultTimeRange: selectedTimeRange });
+    }
+  }, [selectedTimeRange]);
+
+  // Load most recent chat session on mount
+  useEffect(() => {
+    if (chatSessions && chatSessions.length > 0) {
+      const mostRecentSession = chatSessions[0]; // Sessions are ordered by desc
+      if (mostRecentSession.messages.length > 0) {
+        // Get the last assistant message
+        const lastAssistantMsg = [...mostRecentSession.messages]
+          .reverse()
+          .find(msg => msg.role === "assistant");
+
+        if (lastAssistantMsg) {
+          try {
+            const parsedResponse = JSON.parse(lastAssistantMsg.content);
+            setChatResponse(parsedResponse);
+          } catch (err) {
+            console.error("Failed to parse saved chat response:", err);
+          }
+        }
+      }
+    }
+  }, [chatSessions]);
 
   // Load default ticker on mount
   useEffect(() => {
@@ -121,7 +226,8 @@ export default function Home() {
       setChartData(fetchedData);
       setTicker(symbol.toUpperCase());
       setSelectedTimeRange(timeRange);
-      setCurrentTimespan(timespan as "hour" | "day");
+      setCurrentTimespan(timespan as "minute" | "hour" | "day");
+      setCurrentMultiplier(1);
 
       // Track the earliest timestamp we've fetched
       if (fetchedData.length > 0) {
@@ -164,7 +270,9 @@ export default function Home() {
     try {
       // Calculate the time range based on current timespan
       let daysBack = 30;
-      if (currentTimespan === "hour") {
+      if (currentTimespan === "minute") {
+        daysBack = 1; // Load another day for minute data
+      } else if (currentTimespan === "hour") {
         daysBack = 7; // Load another week for hourly data
       } else {
         // For daily data, load based on current time range
@@ -196,11 +304,12 @@ export default function Home() {
         from,
         to,
         timespan: currentTimespan,
-        url: `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}`
+        multiplier: currentMultiplier,
+        url: `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}&multiplier=${currentMultiplier}`
       });
 
       const response = await fetch(
-        `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}`
+        `/api/market-data?ticker=${ticker}&from=${from}&to=${to}&timespan=${currentTimespan}&multiplier=${currentMultiplier}`
       );
 
       if (!response.ok) {
@@ -254,7 +363,7 @@ export default function Home() {
 
       // Auto-add to watchlist if not already there and not at max capacity
       if (!watchlist.includes(newTicker) && watchlist.length < 5) {
-        setWatchlist([...watchlist, newTicker]);
+        addToWatchlist({ userId, ticker: newTicker });
       }
 
       setSearchInput("");
@@ -263,7 +372,7 @@ export default function Home() {
 
   const handleTimeRangeChange = (range: TimeRange) => {
     if (ticker) {
-      fetchMarketData(ticker, range, true);
+      fetchMarketData(ticker, range, false); // Don't use fromWatchlist flag for manual time range changes
     }
   };
 
@@ -332,6 +441,22 @@ export default function Home() {
               } else if (data.type === 'complete') {
                 setChatResponse(data);
                 setCollationProgress(null);
+
+                // Save to Convex chat history (handleTimeRangeSelect)
+                try {
+                  await addChatMessage({
+                    userId,
+                    role: "user",
+                    content: userQuestion,
+                  });
+                  await addChatMessage({
+                    userId,
+                    role: "assistant",
+                    content: JSON.stringify(data),
+                  });
+                } catch (chatErr) {
+                  console.error("Failed to save chat to Convex:", chatErr);
+                }
               }
             }
           }
@@ -352,7 +477,7 @@ export default function Home() {
   };
 
   const handleRemoveFromWatchlist = (tickerToRemove: string) => {
-    setWatchlist(watchlist.filter(t => t !== tickerToRemove));
+    removeFromWatchlist({ userId, ticker: tickerToRemove });
   };
 
   const handleCancelChat = () => {
@@ -438,6 +563,22 @@ export default function Home() {
               } else if (data.type === 'complete') {
                 setChatResponse(data);
                 setCollationProgress(null);
+
+                // Save to Convex chat history (handleAskAthena)
+                try {
+                  await addChatMessage({
+                    userId,
+                    role: "user",
+                    content: question,
+                  });
+                  await addChatMessage({
+                    userId,
+                    role: "assistant",
+                    content: JSON.stringify(data),
+                  });
+                } catch (chatErr) {
+                  console.error("Failed to save chat to Convex:", chatErr);
+                }
               }
             }
           }
@@ -679,7 +820,14 @@ export default function Home() {
             </div>
 
             {error && (
-              <div className="mb-3 rounded bg-red-50 p-2 text-xs text-red-600 flex-shrink-0">
+              <div className="mb-3 rounded bg-red-50 p-2 text-xs text-red-600 flex-shrink-0 relative">
+                <button
+                  onClick={() => setError(null)}
+                  className="absolute top-1 right-1 text-red-400 hover:text-red-600 font-bold text-lg leading-none"
+                  aria-label="Dismiss error"
+                >
+                  ×
+                </button>
                 {error}
                 <p className="mt-1 text-xs">
                   Tip: If you hit rate limits, wait 60 seconds before trying again
@@ -687,7 +835,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="flex-1 min-h-0 overflow-hidden flex-shrink">
+            <div className="flex-1 min-h-[400px] overflow-hidden flex-shrink">
               {chartData.length > 0 ? (
                 <PriceChart
                   ticker={ticker}
@@ -744,8 +892,15 @@ export default function Home() {
           {/* Chat Content Area - Scrollable */}
           <div className="flex-1 overflow-y-auto p-4 min-h-0">
             {error && (
-              <div className="mb-4 rounded bg-red-50 p-3 text-sm text-red-600">
-                {error}
+              <div className="mb-4 rounded bg-red-50 p-3 text-sm text-red-600 relative">
+                <button
+                  onClick={() => setError(null)}
+                  className="absolute top-2 right-2 text-red-400 hover:text-red-600 font-bold text-xl leading-none"
+                  aria-label="Dismiss error"
+                >
+                  ×
+                </button>
+                <div className="pr-6">{error}</div>
               </div>
             )}
 
@@ -920,12 +1075,19 @@ export default function Home() {
                 )}
 
                 {/* Warnings */}
-                {chatResponse.metadata?.errors && chatResponse.metadata.errors.length > 0 && (
-                  <div className="rounded-lg border-yellow-200 bg-yellow-50 p-3 text-xs">
+                {showWarnings && chatResponse.metadata?.errors && chatResponse.metadata.errors.length > 0 && (
+                  <div className="rounded-lg border-yellow-200 bg-yellow-50 p-3 text-xs relative">
+                    <button
+                      onClick={() => setShowWarnings(false)}
+                      className="absolute top-2 right-2 text-yellow-600 hover:text-yellow-800 font-bold text-xl leading-none"
+                      aria-label="Dismiss warnings"
+                    >
+                      ×
+                    </button>
                     <div className="font-semibold text-yellow-800 mb-1">
                       Warnings
                     </div>
-                    <ul className="list-disc list-inside text-yellow-700 space-y-1">
+                    <ul className="list-disc list-inside text-yellow-700 space-y-1 pr-6">
                       {chatResponse.metadata.errors.map((err: string, i: number) => (
                         <li key={i}>{err}</li>
                       ))}

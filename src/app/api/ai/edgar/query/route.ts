@@ -2,9 +2,10 @@
  * API endpoint for querying SEC filings using RAG (vector search)
  * This endpoint:
  * 1. Takes a user question
- * 2. Generates an embedding for the question
- * 3. Performs vector search to find relevant chunks
- * 4. Returns the most relevant filing excerpts
+ * 2. Optionally generates query variations for better retrieval
+ * 3. Generates embeddings for each query
+ * 4. Performs hybrid search (vector + keyword) with RRF fusion
+ * 5. Returns the most relevant filing excerpts
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -13,6 +14,7 @@ import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../../../../convex/_generated/api';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
+import { searchWithQueryExpansionRRF } from '@/lib/queryGenerator';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || '',
@@ -25,12 +27,21 @@ interface QueryRequest {
   question: string;
   formType?: '10-K' | '10-Q' | 'all';
   limit?: number; // Number of chunks to return (default 5)
+  useQueryExpansion?: boolean; // Enable query expansion (default false)
+  maxQueryVariations?: number; // Number of query variations (default 3)
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body: QueryRequest = await req.json();
-    const { ticker, question, formType, limit = 5 } = body;
+    const {
+      ticker,
+      question,
+      formType,
+      limit = 5,
+      useQueryExpansion = false,
+      maxQueryVariations = 3
+    } = body;
 
     if (!ticker || !question) {
       return NextResponse.json(
@@ -42,27 +53,73 @@ export async function POST(req: NextRequest) {
     const tickerUpper = ticker.toUpperCase();
 
     console.log(`[RAG Query] Querying ${tickerUpper} for: "${question}"`);
+    if (useQueryExpansion) {
+      console.log(`[RAG Query] Query expansion enabled (max ${maxQueryVariations} variations)`);
+    }
 
-    // Step 1: Generate embedding for the question
-    const embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: question,
-    });
+    let results: any[];
+    let queryMetadata: any = null;
 
-    const questionEmbedding = embeddingResponse.data[0].embedding;
+    if (useQueryExpansion) {
+      // Use query expansion with RRF across multiple query variations
+      const searchFunction = async (queryVariation: string) => {
+        // Generate embedding for this query variation
+        const embeddingResponse = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: queryVariation,
+        });
+        const embedding = embeddingResponse.data[0].embedding;
 
-    // Step 2: Perform HYBRID search (vector + keyword matching)
-    // This combines semantic similarity with exact keyword matching for better recall
-    const results = await convex.action(api.secFilings.hybridSearchFilingChunks, {
-      ticker: tickerUpper,
-      query: question, // For keyword search
-      embedding: questionEmbedding, // For vector search
-      formType: formType === 'all' ? undefined : formType,
-      limit: limit,
-      minScore: 0.3, // Lower threshold for vector search - be permissive
-    });
+        // Perform hybrid search for this variation
+        return await convex.action(api.secFilings.hybridSearchFilingChunks, {
+          ticker: tickerUpper,
+          query: queryVariation,
+          embedding: embedding,
+          formType: formType === 'all' ? undefined : formType,
+          limit: limit * 2, // Get more candidates for merging
+          minScore: 0.3,
+        });
+      };
 
-    console.log(`[RAG Query] Hybrid search returned ${results?.length || 0} chunks`);
+      // Execute search with query expansion
+      const expansionResult = await searchWithQueryExpansionRRF(
+        question,
+        searchFunction,
+        {
+          maxVariations: maxQueryVariations,
+          rrfK: 60,
+          context: {
+            ticker: tickerUpper,
+            formType: formType === 'all' ? undefined : formType,
+            domain: 'financial',
+          },
+        }
+      );
+
+      results = expansionResult.results.slice(0, limit);
+      queryMetadata = expansionResult.queryMetadata;
+
+      console.log(`[RAG Query] Query expansion executed ${queryMetadata.totalQueriesExecuted} queries`);
+      console.log(`[RAG Query] Merged results: ${results.length} chunks`);
+    } else {
+      // Standard single-query hybrid search
+      const embeddingResponse = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: question,
+      });
+      const questionEmbedding = embeddingResponse.data[0].embedding;
+
+      results = await convex.action(api.secFilings.hybridSearchFilingChunks, {
+        ticker: tickerUpper,
+        query: question,
+        embedding: questionEmbedding,
+        formType: formType === 'all' ? undefined : formType,
+        limit: limit,
+        minScore: 0.3,
+      });
+    }
+
+    console.log(`[RAG Query] Final results: ${results?.length || 0} chunks`);
 
     // DEBUG: Write raw results to file for inspection
     try {
@@ -76,7 +133,9 @@ export async function POST(req: NextRequest) {
         question,
         formType,
         limit,
-        searchType: 'hybrid',
+        searchType: useQueryExpansion ? 'hybrid-with-expansion' : 'hybrid',
+        useQueryExpansion,
+        queryMetadata,
         resultsCount: results?.length || 0,
         results: results?.map((r: any) => ({
           section: r.section,
@@ -85,6 +144,8 @@ export async function POST(req: NextRequest) {
           hybridScore: r.hybridScore,
           vectorScore: r.vectorScore,
           keywordScore: r.keywordScore,
+          rrfScore: r._rrfScore,
+          queryMatches: r._queryMatches,
           textPreview: r.text?.substring(0, 200) + '...',
         })) || [],
       };
@@ -135,6 +196,11 @@ export async function POST(req: NextRequest) {
         totalChunks: results.length,
         formTypes: [...new Set(chunks.map((c) => c.formType))],
         sections: [...new Set(chunks.map((c) => c.section))],
+        useQueryExpansion,
+        queryMetadata: queryMetadata ? {
+          queriesExecuted: queryMetadata.totalQueriesExecuted,
+          variationsUsed: queryMetadata.variationsUsed.map((v: any) => v.query),
+        } : undefined,
       },
     });
   } catch (error) {

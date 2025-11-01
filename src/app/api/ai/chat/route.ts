@@ -28,6 +28,15 @@ interface Source {
   date?: string;
 }
 
+/**
+ * Determines if query expansion should be enabled based on query characteristics
+ * Currently configured to ALWAYS enable query expansion for all queries
+ */
+function shouldEnableQueryExpansion(_question: string): boolean {
+  // Always enable query expansion for maximum retrieval coverage
+  return true;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const body: ChatRequest = await req.json();
@@ -58,6 +67,8 @@ export async function POST(req: NextRequest) {
 
     const sources: Source[] = [];
     const errors: string[] = [];
+    let edgarQueryExpansionUsed = false;
+    let edgarQueryMetadata: any = null;
 
     // Create a ReadableStream for progress updates
     const encoder = new TextEncoder();
@@ -156,6 +167,14 @@ export async function POST(req: NextRequest) {
             sendProgress('Querying SEC filings...', currentStep, totalSteps);
             console.log(`[${currentStep}/${totalSteps}] Querying SEC filings with RAG...`);
             try {
+              // Determine if query expansion should be enabled
+              // Enable for vague/short queries that would benefit from multiple search angles
+              const shouldUseQueryExpansion = shouldEnableQueryExpansion(question);
+
+              if (shouldUseQueryExpansion) {
+                console.log(`[EDGAR] Enabling query expansion for vague query: "${question}"`);
+              }
+
               // Use RAG to get relevant filing excerpts
               const ragResponse = await fetch(`${req.nextUrl.origin}/api/ai/edgar/query`, {
                 method: 'POST',
@@ -165,11 +184,20 @@ export async function POST(req: NextRequest) {
                   question,
                   formType: '10-K', // Focus on annual reports for now
                   limit: 5,
+                  useQueryExpansion: shouldUseQueryExpansion,
+                  maxQueryVariations: 3,
                 }),
               });
 
               if (ragResponse.ok) {
                 const ragData = await ragResponse.json();
+
+                // Store query expansion metadata
+                if (ragData.metadata?.useQueryExpansion) {
+                  edgarQueryExpansionUsed = true;
+                  edgarQueryMetadata = ragData.metadata.queryMetadata;
+                  console.log(`[EDGAR] Query expansion used: ${edgarQueryMetadata?.queriesExecuted} queries executed`);
+                }
 
                 if (ragData.chunks && ragData.chunks.length > 0) {
                   // Add each relevant chunk as a source
@@ -356,8 +384,13 @@ Instructions:
 Key instructions:
 - PERSONALIZATION: Reference the user's trading history and past decisions when relevant
 - ORGANIZATION: Use clear section headers (e.g., "## Your History with ${ticker || 'this stock'}", "## Current Market Context", "## Recommendation")
-- SOURCES: Always cite specific sources using [Source N] format
-- BALANCE: Combine personal insights with objective market data
+- SOURCES: **CRITICAL** - You MUST cite and reference ALL provided sources using [Source N] format. This includes:
+  * SEC filings (10-K, 10-Q, etc.)
+  * Web research and news articles
+  * Social media posts (Reddit threads, X/Twitter posts)
+  * Any other data sources provided
+- COMPREHENSIVE: Reference information from ALL source types that are present in the context. If Reddit posts exist, cite them. If X posts exist, cite them. Do not ignore any source type.
+- BALANCE: Combine personal insights with objective market data from all available sources
 - CONCISENESS: 3-5 paragraphs total
 - If the user has traded this stock before, compare their past rationale with current conditions
 
@@ -368,11 +401,17 @@ ${context}`;
             systemPrompt = `You are Athena, a financial research assistant. Answer the user's question using the provided market context.
 
 Key instructions:
-- ORGANIZATION: Group information by source type (e.g., "## SEC Filings", "## Web Research", "## Social Media")
-- SOURCES: Always cite specific sources using [Source N] format
+- ORGANIZATION: Group information by source type. Create sections for each type present (e.g., "## SEC Filings", "## Web Research", "## Social Media Sentiment")
+- SOURCES: **CRITICAL** - You MUST cite and reference ALL provided sources using [Source N] format. This includes:
+  * SEC filings (10-K, 10-Q, 8-K, etc.) - Always cite these when discussing financials or company disclosures
+  * Web research and news articles - Cite when discussing market conditions or news
+  * Social media posts (Reddit, X/Twitter) - **ALWAYS cite and reference these when present**. Social sentiment is valuable context.
+  * Any other data sources provided
+- COMPREHENSIVE: You must acknowledge and incorporate information from EVERY source type provided. If Reddit posts are included, explicitly reference them (e.g., "According to Reddit discussions [Source 5]..."). If X/Twitter posts are included, cite them (e.g., "Social media sentiment on X [Source 7] suggests..."). Do NOT skip or ignore any source type.
 - OBJECTIVITY: Focus on facts, not speculation or recommendations
-- CONCISENESS: 3-5 paragraphs total
+- CONCISENESS: 3-5 paragraphs total, but ensure all source types are covered
 - DATES: Highlight key dates and events when relevant
+- TRANSPARENCY: At the end, briefly note which source types were used in your analysis (e.g., "Analysis based on: SEC filings, web research, and Reddit discussions")
 
 MARKET CONTEXT:
 ${context}`;
@@ -418,6 +457,11 @@ ${context}`;
               errors: errors.length > 0 ? errors : undefined,
               usage: completion.usage,
               hasMemory: tradingMemoryContext.length > 0,
+              queryExpansion: edgarQueryExpansionUsed ? {
+                enabled: true,
+                queriesExecuted: edgarQueryMetadata?.queriesExecuted,
+                variationsUsed: edgarQueryMetadata?.variationsUsed,
+              } : undefined,
             },
           });
         } catch (error) {

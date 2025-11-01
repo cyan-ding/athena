@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Webhook } from "svix";
 import { sendEmail } from "@/lib/agentmail";
-import { parseUserIntent, extractMainContent } from "@/utils/intent-parser";
+import { parseUserResponse, extractMainContent } from "@/utils/intent-parser";
 import { buildTradeConfirmationEmail } from "@/utils/email-templates";
 import { placeMarketOrder } from '@/lib/alpaca';
 
@@ -60,9 +60,11 @@ export async function POST(req: NextRequest) {
     const mainContent = extractMainContent(text || html || "");
     console.log("[Webhook] Main content:", mainContent);
 
-    // Parse user intent
-    const intent = parseUserIntent(mainContent);
+    // Parse user intent and quantity
+    const parsedResponse = parseUserResponse(mainContent);
+    const { intent, quantity: userQuantity } = parsedResponse;
     console.log("[Webhook] Parsed intent:", intent);
+    console.log("[Webhook] User specified quantity:", userQuantity);
 
     // Extract alert metadata from message labels
     // In production, we'd fetch the alert from Convex using thread_id
@@ -108,9 +110,13 @@ export async function POST(req: NextRequest) {
     // Mock trade data (in production, fetch from the alert in Convex)
     const ticker = "NVDA"; // Extract from labels or DB
     const action = "buy"; // Extract from alert
-    const quantity = 50;
+    const defaultQuantity = 50; // Default quantity from alert
+    // Use user-specified quantity if provided, otherwise use default
+    const quantity = userQuantity || defaultQuantity;
     const price = 515.3;
     const timestamp = new Date().toLocaleString();
+
+    console.log(`[Webhook] Using quantity: ${quantity} ${userQuantity ? '(user-specified)' : '(default)'}`);
 
     // Execute actual trade via Alpaca API
     console.log("[Alpaca] Executing trade:", {

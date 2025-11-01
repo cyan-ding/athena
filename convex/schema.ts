@@ -232,4 +232,24 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_ticker", ["userId", "ticker"])
     .index("by_status", ["status"]),
+
+  // User preferences (UI settings, chart preferences, etc.)
+  userPreferences: defineTable({
+    userId: v.string(),
+
+    // Chart preferences
+    defaultTimeRange: v.optional(v.string()), // "1D", "1W", "1M", "3M", "6M", "1Y"
+    defaultTicker: v.optional(v.string()),
+
+    // UI preferences
+    useBrowserUse: v.optional(v.boolean()),
+    showCitations: v.optional(v.boolean()),
+    theme: v.optional(v.string()), // "light", "dark", "auto"
+
+    // Feature flags
+    enableNotifications: v.optional(v.boolean()),
+    enableAutoTrading: v.optional(v.boolean()),
+
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
 });

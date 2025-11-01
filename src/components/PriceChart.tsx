@@ -69,6 +69,7 @@ export function PriceChart({ ticker, data, onTimeRangeSelect, onLoadMoreData, is
         fixRightEdge: false,
         lockVisibleTimeRangeOnResize: false,
         shiftVisibleRangeOnNewBar: false,
+        visible: true, // Ensure time scale is visible
       },
       handleScroll: {
         mouseWheel: true,

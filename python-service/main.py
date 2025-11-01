@@ -107,7 +107,7 @@ async def scrape_reddit(request: ScrapeRequest):
 
         # Create scraping task
         task = f"""
-        Search Google for: site:reddit.com "{request.ticker}" after:{request.start_date} before:{request.end_date}
+        Search Google for: reddit.com "{request.ticker}" after{request.start_date} before {request.end_date}
 
         Find the top {request.max_results} Reddit posts about ${request.ticker} from subreddits like:
         - r/wallstreetbets
